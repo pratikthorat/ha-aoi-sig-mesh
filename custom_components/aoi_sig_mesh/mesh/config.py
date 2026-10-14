@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 
 from .errors import MalformedPDUError
 from .models import encode_opcode
@@ -96,3 +97,68 @@ def parse_status_code(params: bytes) -> int:
     if not params:
         raise MalformedPDUError("config status without a status code")
     return params[0]
+
+
+COMPOSITION_HEADER = struct.Struct("<BHHHHH")  # page, CID, PID, VID, CRPL, features
+ELEMENT_HEADER = struct.Struct("<HBB")  # location, NumS, NumV
+
+
+@dataclass(frozen=True)
+class Element:
+    location: int
+    sig_models: tuple[int, ...]
+    vendor_models: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class CompositionData:
+    page: int
+    cid: int
+    pid: int
+    vid: int
+    crpl: int
+    features: int
+    elements: tuple[Element, ...]
+
+
+def parse_composition_status(params: bytes) -> CompositionData:
+    """Parse Config Composition Data Status params (page byte first)."""
+    if len(params) < COMPOSITION_HEADER.size:
+        raise MalformedPDUError("composition data header too short")
+    page, cid, pid, vid, crpl, features = COMPOSITION_HEADER.unpack_from(params)
+    offset = COMPOSITION_HEADER.size
+    elements = []
+    while offset < len(params):
+        if offset + ELEMENT_HEADER.size > len(params):
+            raise MalformedPDUError("element header cut short")
+        location, num_sig, num_vendor = ELEMENT_HEADER.unpack_from(params, offset)
+        offset += ELEMENT_HEADER.size
+        if offset + num_sig * 2 + num_vendor * 4 > len(params):
+            raise MalformedPDUError("element model list cut short")
+        sig = struct.unpack_from(f"<{num_sig}H", params, offset)
+        offset += num_sig * 2
+        vendor = []
+        for _ in range(num_vendor):
+            vendor_cid, model = struct.unpack_from("<HH", params, offset)
+            vendor.append((vendor_cid << 16) | model)
+            offset += 4
+        elements.append(Element(location, tuple(sig), tuple(vendor)))
+    if not elements:
+        raise MalformedPDUError("composition data has no elements")
+    return CompositionData(page, cid, pid, vid, crpl, features, tuple(elements))
+
+
+def encode_composition(comp: CompositionData) -> bytes:
+    """Encode composition data as Config Composition Data Status params."""
+    out = bytearray(
+        COMPOSITION_HEADER.pack(comp.page, comp.cid, comp.pid, comp.vid, comp.crpl, comp.features)
+    )
+    for element in comp.elements:
+        out += ELEMENT_HEADER.pack(
+            element.location, len(element.sig_models), len(element.vendor_models)
+        )
+        for model in element.sig_models:
+            out += struct.pack("<H", model)
+        for model in element.vendor_models:
+            out += encode_model_id(model)
+    return bytes(out)

@@ -1,13 +1,17 @@
 import pytest
 
 from mesh.config import (
+    CompositionData,
+    Element,
     config_appkey_add,
     config_composition_get,
     config_model_app_bind,
     config_model_publication_set,
     config_node_reset,
+    encode_composition,
     encode_model_id,
     pack_key_indexes,
+    parse_composition_status,
     parse_status_code,
 )
 from mesh.errors import MalformedPDUError
@@ -71,3 +75,44 @@ def test_parse_status_code():
     assert parse_status_code(b"\x00\x01\x02") == 0
     with pytest.raises(MalformedPDUError):
         parse_status_code(b"")
+
+
+# Page 0 of a Tuya-style CTL bulb: element 0 has Config, Health, OnOff, Lightness, CTL and a
+# Tuya vendor model; element 1 has CTL Temperature.
+TUYA_CTL_COMPOSITION = bytes.fromhex(
+    "00d007800237370a0003000000050100000200001000130313d0070400000001000613"
+)
+TUYA_CTL = CompositionData(
+    page=0,
+    cid=0x07D0,
+    pid=0x0280,
+    vid=0x3737,
+    crpl=10,
+    features=3,
+    elements=(
+        Element(0, (0x0000, 0x0002, 0x1000, 0x1300, 0x1303), (VENDOR_MODEL,)),
+        Element(0, (0x1306,), ()),
+    ),
+)
+
+
+def test_parse_composition_status():
+    assert parse_composition_status(TUYA_CTL_COMPOSITION) == TUYA_CTL
+
+
+def test_encode_composition_round_trip():
+    assert encode_composition(TUYA_CTL) == TUYA_CTL_COMPOSITION
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        TUYA_CTL_COMPOSITION[:10],  # header cut short
+        TUYA_CTL_COMPOSITION[:11],  # header only, no elements
+        TUYA_CTL_COMPOSITION[:14],  # element header cut short
+        TUYA_CTL_COMPOSITION[:-1],  # model list cut short
+    ],
+)
+def test_parse_composition_status_malformed(params):
+    with pytest.raises(MalformedPDUError):
+        parse_composition_status(params)
