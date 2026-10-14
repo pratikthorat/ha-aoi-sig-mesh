@@ -14,8 +14,8 @@ from mesh.models import (
     onoff_set,
 )
 from mesh.network import BeaconOutcome, MeshNetwork
-from mesh.pdu import FILTER_ACCEPT, PDU_BEACON, PDU_NETWORK, PDU_PROXY_CONFIG
-from mesh.proxy import AccessMessage, ProxyLink
+from mesh.pdu import FILTER_ACCEPT, PDU_BEACON, PDU_NETWORK, PDU_PROXY_CONFIG, NetworkKeys
+from mesh.proxy import AccessMessage, ProxyAdvert, ProxyLink, parse_proxy_service_data
 from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, LoopbackTransport, SimMesh, run
 
 
@@ -353,3 +353,15 @@ def test_beacon_too_far_ahead_is_reported_not_applied():
 
     assert run(scenario()) == 0
     assert outcomes == [BeaconOutcome.TOO_FAR]
+
+
+def test_parse_proxy_service_data():
+    network_id = NetworkKeys.from_net_key(NET_KEY).network_id
+    assert parse_proxy_service_data(b"\x00" + network_id) == ProxyAdvert(network_id=network_id)
+    identity = bytes(range(1, 17))
+    assert parse_proxy_service_data(b"\x01" + identity) == ProxyAdvert(
+        node_hash=identity[:8], node_random=identity[8:]
+    )
+    assert parse_proxy_service_data(b"") is None
+    assert parse_proxy_service_data(b"\x00" + network_id[:7]) is None
+    assert parse_proxy_service_data(b"\x02" + network_id) is None

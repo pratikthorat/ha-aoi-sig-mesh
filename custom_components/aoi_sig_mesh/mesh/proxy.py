@@ -509,3 +509,25 @@ class ProxyLink:
                 self._on_close()
             except Exception:
                 _LOGGER.exception("on_close callback failed")
+
+
+ADVERT_NETWORK_ID = 0x00
+ADVERT_NODE_IDENTITY = 0x01
+
+
+@dataclass(frozen=True)
+class ProxyAdvert:
+    """Mesh Proxy service (0x1828) data: which network, or which node, a proxy serves."""
+
+    network_id: bytes | None = None
+    node_hash: bytes | None = None
+    node_random: bytes | None = None
+
+
+def parse_proxy_service_data(data: bytes) -> ProxyAdvert | None:
+    """Parse the 0x1828 service data of an advertisement; None if it is not valid."""
+    if len(data) == 9 and data[0] == ADVERT_NETWORK_ID:
+        return ProxyAdvert(network_id=bytes(data[1:9]))
+    if len(data) == 17 and data[0] == ADVERT_NODE_IDENTITY:
+        return ProxyAdvert(node_hash=bytes(data[1:9]), node_random=bytes(data[9:17]))
+    return None
