@@ -91,3 +91,44 @@ def test_seq_exhaustion_raises():
         net.next_seq()
     with pytest.raises(MeshError):
         make(state={"seq": SEQ_MAX}).next_seq(2)
+
+
+def test_replay_accepts_only_increasing_seq():
+    net = make()
+    assert net.accept_replay(0x00B0, 5, 0)
+    assert not net.accept_replay(0x00B0, 5, 0)
+    assert not net.accept_replay(0x00B0, 4, 0)
+    assert net.accept_replay(0x00B0, 6, 0)
+
+
+def test_replay_newer_iv_index_lowers_the_seq_floor():
+    net = make()
+    assert net.accept_replay(0x00B0, 1000, 0)
+    assert net.accept_replay(0x00B0, 1, 1)
+    assert not net.accept_replay(0x00B0, 2000, 0)  # old IV index
+
+
+def test_replay_is_per_source():
+    net = make()
+    assert net.accept_replay(0x00B0, 5, 0)
+    assert net.accept_replay(0x00C0, 5, 0)
+
+
+def test_forget_replay_after_reprovision():
+    net = make()
+    for src in (0x00B0, 0x00B1, 0x00C0):
+        net.accept_replay(src, 500, 0)
+    net.forget_replay(0x00B0, 2)  # node at 0x00B0 with two elements was reset
+    assert net.accept_replay(0x00B0, 0, 0)
+    assert net.accept_replay(0x00B1, 0, 0)
+    assert not net.accept_replay(0x00C0, 0, 0)
+
+
+def test_replay_cache_round_trips_through_state():
+    saved = []
+    net = make(saved=saved)
+    net.accept_replay(0x00B0, 7, 0)
+    assert saved == []  # replay updates alone do not write to disk
+    state = net.persistent_state()
+    assert state["replay"] == {"176": [0, 7]}
+    assert not make(state=state).accept_replay(0x00B0, 7, 0)

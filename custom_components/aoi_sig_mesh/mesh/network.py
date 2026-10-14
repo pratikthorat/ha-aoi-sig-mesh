@@ -42,6 +42,9 @@ class MeshNetwork:
         self._iv_update = bool(state.get("iv_update", False))
         self._seq = int(state.get("seq", 0))
         self._ceiling = self._seq
+        self._replay: dict[int, tuple[int, int]] = {
+            int(src): (int(last[0]), int(last[1])) for src, last in state.get("replay", {}).items()
+        }
         self._on_persist = on_persist
 
     def __repr__(self) -> str:
@@ -55,7 +58,7 @@ class MeshNetwork:
             "iv_index": self._iv_index,
             "iv_update": self._iv_update,
             "seq": self._ceiling,
-            "replay": {},
+            "replay": {str(src): [iv, seq] for src, (iv, seq) in self._replay.items()},
         }
 
     def _persist(self) -> None:
@@ -78,3 +81,16 @@ class MeshNetwork:
                 raise
         self._seq = end
         return first
+
+    def accept_replay(self, src: int, seq: int, iv_index: int) -> bool:
+        """Replay protection: accept only a newer (iv_index, seq) than last seen from src."""
+        last = self._replay.get(src)
+        if last is not None and (iv_index, seq) <= last:
+            return False
+        self._replay[src] = (iv_index, seq)
+        return True
+
+    def forget_replay(self, first: int, count: int) -> None:
+        """Clear the cache for a node's elements, e.g. after it is reset and re-provisioned."""
+        for src in range(first, first + count):
+            self._replay.pop(src, None)
