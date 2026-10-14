@@ -125,3 +125,25 @@ def seq_auth_from_segment(net_seq: int, seq_zero: int) -> int | None:
     if seq > net_seq:
         seq -= SEQ_ZERO_MASK + 1
     return seq if seq >= 0 else None
+
+
+@dataclass(frozen=True)
+class SegmentAck:
+    obo: bool
+    seq_zero: int
+    block_ack: int
+
+
+def make_segment_ack(seq_zero: int, block_ack: int, *, obo: bool = False) -> bytes:
+    """Lower transport control PDU (opcode 0x00) acknowledging received segments."""
+    head = (int(obo) << 15) | ((seq_zero & SEQ_ZERO_MASK) << 2)
+    return bytes([CTL_OP_SEGMENT_ACK]) + head.to_bytes(2, "big") + block_ack.to_bytes(4, "big")
+
+
+def parse_segment_ack(pdu: bytes) -> SegmentAck | None:
+    if len(pdu) != 7 or pdu[0] != CTL_OP_SEGMENT_ACK:
+        return None
+    head = int.from_bytes(pdu[1:3], "big")
+    return SegmentAck(
+        bool(head >> 15), (head >> 2) & SEQ_ZERO_MASK, int.from_bytes(pdu[3:7], "big")
+    )

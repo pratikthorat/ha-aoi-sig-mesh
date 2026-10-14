@@ -4,9 +4,12 @@ from mesh.errors import MalformedPDUError
 from mesh.transport import (
     SEGMENT_SIZE,
     LowerAccess,
+    SegmentAck,
     decrypt_upper,
     encrypt_upper,
+    make_segment_ack,
     parse_lower_access,
+    parse_segment_ack,
     segmented_access,
     seq_auth_from_segment,
     unsegmented_access,
@@ -99,3 +102,26 @@ def test_parse_lower_access_malformed(pdu):
 )
 def test_seq_auth_from_segment(net_seq, seq_zero, expected):
     assert seq_auth_from_segment(net_seq, seq_zero) == expected
+
+
+def test_make_segment_ack():
+    assert make_segment_ack(0x0ABC, 0b11) == bytes.fromhex("002af000000003")
+    assert make_segment_ack(0x0ABC, 0b11, obo=True) == bytes.fromhex("00aaf000000003")
+
+
+def test_parse_segment_ack_round_trip():
+    ack = parse_segment_ack(make_segment_ack(0x1FFF, 0xFFFFFFFF, obo=True))
+    assert ack == SegmentAck(True, 0x1FFF, 0xFFFFFFFF)
+
+
+@pytest.mark.parametrize(
+    "pdu",
+    [
+        b"",
+        bytes.fromhex("002af0000000"),
+        bytes.fromhex("012af000000003"),
+        bytes.fromhex("802af000000003"),
+    ],
+)
+def test_parse_segment_ack_rejects(pdu):
+    assert parse_segment_ack(pdu) is None
