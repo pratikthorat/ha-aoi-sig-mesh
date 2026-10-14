@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from mesh.errors import MalformedPDUError
@@ -7,6 +9,7 @@ from mesh.transport import (
     Reassembled,
     SegmentAck,
     SegmentReassembler,
+    SegmentResult,
     decrypt_upper,
     encrypt_upper,
     make_segment_ack,
@@ -211,6 +214,9 @@ def test_inconsistent_segments_are_ignored():
     assert rx.add(0x00B0, *other_shape, iv_index=0).block_ack == 0
     short = LowerAccess(True, 1, 0x26, 0, 100, 1, 2, b"\x00" * 5)  # middle segment, not 12 bytes
     assert rx.add(0x00B0, 101, short, iv_index=0).block_ack == 0
+    segs = _segments(100)
+    rx.add(0x00B0, *segs[1], iv_index=0)
+    assert rx.add(0x00B0, *segs[2], iv_index=0).message.upper == UPPER
 
 
 def test_unrecoverable_seq_auth_is_ignored():
@@ -254,3 +260,66 @@ def test_forget_lets_a_reprovisioned_node_start_over():
     for src, segs in outside.items():
         rx.add(src, *segs[1], iv_index=0)
         assert rx.add(src, *segs[2], iv_index=0).message is not None, hex(src)
+
+
+def test_unsegmented_or_out_of_range_segment_is_ignored():
+    rx = SegmentReassembler()
+    unsegmented = parse_lower_access(unsegmented_access(bytes(8), akf=1, aid=0x26))
+    assert rx.add(0x00B0, 300, unsegmented, iv_index=0) == SegmentResult(None, 0, 0, False)
+    beyond = LowerAccess(True, 1, 0x26, 0, 100, 5, 1, bytes(12))  # SegO 5 > SegN 1
+    assert rx.add(0x00B0, 100, beyond, iv_index=0) == SegmentResult(None, 0, 100, False)
+    segs = _segments(100)
+    for seg in segs[:-1]:
+        rx.add(0x00B0, *seg, iv_index=0)
+    assert rx.add(0x00B0, *segs[-1], iv_index=0).message.upper == UPPER
+
+
+def test_rejected_newer_segment_keeps_the_message_in_progress():
+    rx = SegmentReassembler()
+    segs = _segments(100)
+    rx.add(0x00B0, *segs[0], iv_index=0)
+    short = LowerAccess(True, 1, 0x26, 0, 300, 0, 2, bytes(5))  # non-final, not 12 bytes
+    assert rx.add(0x00B0, 300, short, iv_index=0) == SegmentResult(None, 0, 300, False)
+    too_long = LowerAccess(True, 1, 0x26, 0, 300, 2, 2, bytes(SEGMENT_SIZE + 1))  # final, 13
+    assert rx.add(0x00B0, 302, too_long, iv_index=0) == SegmentResult(None, 0, 300, False)
+    rx.add(0x00B0, *segs[1], iv_index=0)
+    assert rx.add(0x00B0, *segs[2], iv_index=0).message.seq_auth == 100
+
+
+def test_segment_with_a_different_header_is_ignored():
+    rx = SegmentReassembler()
+    segs = _segments(100)
+    rx.add(0x00B0, *segs[0], iv_index=0)
+    net_seq, middle = segs[1]
+    for changed in (replace(middle, aid=0x27), replace(middle, szmic=1)):
+        assert rx.add(0x00B0, net_seq, changed, iv_index=0) == SegmentResult(None, 0, 100, False)
+    rx.add(0x00B0, *segs[1], iv_index=0)
+    assert rx.add(0x00B0, *segs[2], iv_index=0).message == Reassembled(100, 1, 0x26, 0, UPPER, 0)
+
+
+def test_older_segment_while_a_newer_message_is_in_progress_is_ignored():
+    rx = SegmentReassembler()
+    segs = _segments(300)
+    rx.add(0x00B0, *segs[0], iv_index=0)
+    old = rx.add(0x00B0, *_segments(100)[0], iv_index=0)
+    assert old == SegmentResult(None, 0, 100, False)
+    rx.add(0x00B0, *segs[1], iv_index=0)
+    assert rx.add(0x00B0, *segs[2], iv_index=0).message.seq_auth == 300
+
+
+def test_reassembles_across_a_seq_zero_wrap():
+    rx = SegmentReassembler()
+    segs = _segments(0x1FFE)
+    assert [net_seq for net_seq, _ in segs] == [0x1FFE, 0x1FFF, 0x2000]
+    for seg in segs[:-1]:
+        rx.add(0x00B0, *seg, iv_index=0)
+    assert rx.add(0x00B0, *segs[-1], iv_index=0).message.seq_auth == 0x1FFE
+
+
+def test_single_segment_message():
+    rx = SegmentReassembler()
+    [(net_seq, only)] = _segments(100, upper=bytes(10))
+    assert only.seg_n == 0
+    done = rx.add(0x00B0, net_seq, only, iv_index=0)
+    assert done.message == Reassembled(100, 1, 0x26, 0, bytes(10), 0)
+    assert (done.block_ack, done.send_ack) == (0b1, True)

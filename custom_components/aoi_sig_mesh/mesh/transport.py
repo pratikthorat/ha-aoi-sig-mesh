@@ -198,6 +198,12 @@ class SegmentReassembler:
 
     def add(self, src: int, net_seq: int, seg: LowerAccess, *, iv_index: int) -> SegmentResult:
         ignore = SegmentResult(None, 0, seg.seq_zero, False)
+        if not seg.seg or seg.seg_o > seg.seg_n:
+            return ignore
+        if len(seg.data) > SEGMENT_SIZE or (
+            seg.seg_o < seg.seg_n and len(seg.data) != SEGMENT_SIZE
+        ):
+            return ignore
         seq_auth = seq_auth_from_segment(net_seq, seg.seq_zero)
         if seq_auth is None:
             return ignore
@@ -212,11 +218,15 @@ class SegmentReassembler:
         if partial is not None and key < partial.key:
             return ignore
         if partial is None or key > partial.key:
+            # Every check has passed, so the newer message may replace the one in progress.
             partial = _Partial(key, seq_auth, iv_index, seg.seg_n, seg.akf, seg.aid, seg.szmic)
             self._partial[src] = partial
-        if seg.seg_n != partial.seg_n:
-            return ignore
-        if seg.seg_o < seg.seg_n and len(seg.data) != SEGMENT_SIZE:
+        elif (seg.seg_n, seg.akf, seg.aid, seg.szmic) != (
+            partial.seg_n,
+            partial.akf,
+            partial.aid,
+            partial.szmic,
+        ):
             return ignore
         partial.parts[seg.seg_o] = seg.data
         if len(partial.parts) <= partial.seg_n:
