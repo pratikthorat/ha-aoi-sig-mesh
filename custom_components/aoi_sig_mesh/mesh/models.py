@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 from .errors import MalformedPDUError
 
 MODEL_CONFIG_SERVER = 0x0000
@@ -88,3 +90,108 @@ def decode_transition(value: int) -> int | None:
     if steps == _UNKNOWN_STEPS:
         return None
     return steps * _STEP_MS[value >> 6]
+
+
+def _tail(transition_ms: int | None, delay_ms: int) -> bytes:
+    if transition_ms is None:
+        return b""
+    return bytes([encode_transition(transition_ms), min(max(delay_ms, 0) // 5, 0xFF)])
+
+
+def _check_lightness(lightness: int) -> None:
+    if not 0 <= lightness <= LIGHTNESS_MAX:
+        raise ValueError(f"lightness {lightness} out of range 0-{LIGHTNESS_MAX}")
+
+
+def _check_kelvin(kelvin: int) -> None:
+    if not KELVIN_MIN <= kelvin <= KELVIN_MAX:
+        raise ValueError(f"temperature {kelvin} K out of range {KELVIN_MIN}-{KELVIN_MAX}")
+
+
+def onoff_get() -> bytes:
+    return encode_opcode(OP_ONOFF_GET)
+
+
+def onoff_set(
+    on: bool, tid: int, *, transition_ms: int | None = None, delay_ms: int = 0, ack: bool = True
+) -> bytes:
+    opcode = OP_ONOFF_SET if ack else OP_ONOFF_SET_UNACK
+    return (
+        encode_opcode(opcode) + bytes([1 if on else 0, tid & 0xFF]) + _tail(transition_ms, delay_ms)
+    )
+
+
+def lightness_get() -> bytes:
+    return encode_opcode(OP_LIGHTNESS_GET)
+
+
+def lightness_set(
+    lightness: int,
+    tid: int,
+    *,
+    transition_ms: int | None = None,
+    delay_ms: int = 0,
+    ack: bool = True,
+) -> bytes:
+    _check_lightness(lightness)
+    opcode = OP_LIGHTNESS_SET if ack else OP_LIGHTNESS_SET_UNACK
+    return (
+        encode_opcode(opcode)
+        + struct.pack("<HB", lightness, tid & 0xFF)
+        + _tail(transition_ms, delay_ms)
+    )
+
+
+def ctl_get() -> bytes:
+    return encode_opcode(OP_CTL_GET)
+
+
+def ctl_set(
+    lightness: int,
+    kelvin: int,
+    tid: int,
+    *,
+    delta_uv: int = 0,
+    transition_ms: int | None = None,
+    delay_ms: int = 0,
+    ack: bool = True,
+) -> bytes:
+    _check_lightness(lightness)
+    _check_kelvin(kelvin)
+    opcode = OP_CTL_SET if ack else OP_CTL_SET_UNACK
+    return (
+        encode_opcode(opcode)
+        + struct.pack("<HHhB", lightness, kelvin, delta_uv, tid & 0xFF)
+        + _tail(transition_ms, delay_ms)
+    )
+
+
+def ctl_temperature_get() -> bytes:
+    return encode_opcode(OP_CTL_TEMP_GET)
+
+
+def ctl_temperature_set(
+    kelvin: int,
+    tid: int,
+    *,
+    delta_uv: int = 0,
+    transition_ms: int | None = None,
+    delay_ms: int = 0,
+    ack: bool = True,
+) -> bytes:
+    _check_kelvin(kelvin)
+    opcode = OP_CTL_TEMP_SET if ack else OP_CTL_TEMP_SET_UNACK
+    return (
+        encode_opcode(opcode)
+        + struct.pack("<HhB", kelvin, delta_uv, tid & 0xFF)
+        + _tail(transition_ms, delay_ms)
+    )
+
+
+def ctl_temperature_range_get() -> bytes:
+    return encode_opcode(OP_CTL_TEMP_RANGE_GET)
+
+
+def health_attention_set(seconds: int, *, ack: bool = False) -> bytes:
+    opcode = OP_HEALTH_ATTENTION_SET if ack else OP_HEALTH_ATTENTION_SET_UNACK
+    return encode_opcode(opcode) + bytes([min(max(seconds, 0), 0xFF)])
