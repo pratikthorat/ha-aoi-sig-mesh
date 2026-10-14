@@ -1,3 +1,5 @@
+import asyncio
+
 from mesh.config import (
     config_appkey_add,
     config_composition_get,
@@ -16,7 +18,26 @@ from mesh.models import (
     onoff_get,
     onoff_set,
 )
-from tests.sim.mesh_sim import APP_KEY, SimNode
+from mesh.pdu import (
+    FILTER_ACCEPT,
+    PDU_BEACON,
+    PDU_NETWORK,
+    PDU_PROXY_CONFIG,
+    FilterStatus,
+    ProxyReassembler,
+    SecureBeacon,
+    add_addresses,
+    decrypt_network_pdu,
+    decrypt_proxy_config,
+    encrypt_network_pdu,
+    encrypt_proxy_config,
+    parse_filter_status,
+    parse_secure_beacon,
+    proxy_pdus,
+    set_filter_type,
+)
+from mesh.transport import decrypt_upper, encrypt_upper, parse_lower_access, unsegmented_access
+from tests.sim.mesh_sim import APP_KEY, CLIENT, SimMesh, SimNode, run
 
 DEV_KEY = bytes.fromhex("9d6dd0e96eb25dc19a40ed9914f8f03f")
 
@@ -98,3 +119,93 @@ def test_config_messages():
         (0x00B0, bytes.fromhex("804a"))
     ]
     assert node.handle(0x00B0, onoff_get(), dev_key=False) == []  # unprovisioned now
+
+
+def notifications(transport):
+    received = []
+    transport.set_notify_callback(received.append)
+    return received
+
+
+def messages(parts):
+    rx = ProxyReassembler()
+    return [m for m in map(rx.feed, parts) if m is not None]
+
+
+def client_network_pdu(sim, dst, access, seq):
+    upper = encrypt_upper(
+        APP_KEY, akf=1, szmic=0, seq=seq, src=CLIENT, dst=dst, iv_index=0, access_payload=access
+    )
+    return encrypt_network_pdu(
+        sim.keys,
+        ctl=0,
+        ttl=5,
+        seq=seq,
+        src=CLIENT,
+        dst=dst,
+        transport_pdu=unsegmented_access(upper, akf=1, aid=sim.aid),
+        iv_index=0,
+    )
+
+
+def test_connect_sends_a_beacon():
+    sim = SimMesh()
+
+    async def scenario():
+        received = notifications(sim.connect())
+        await asyncio.sleep(0)
+        return messages(received)
+
+    [(pdu_type, payload)] = run(scenario())
+    assert pdu_type == PDU_BEACON
+    assert parse_secure_beacon(sim.keys, payload) == SecureBeacon(False, False, 0)
+
+
+def test_onoff_set_round_trip():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    assert (node.unicast, sim.dev_key_for(0x00B1)) == (0x00B0, node.dev_key)
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        pdu = client_network_pdu(sim, node.unicast, onoff_set(True, 1), seq=1)
+        for part in proxy_pdus(PDU_NETWORK, pdu, transport.max_write):
+            await transport.write(part)
+        await asyncio.sleep(0)
+        return messages(received)
+
+    [(pdu_type, payload)] = run(scenario())
+    assert pdu_type == PDU_NETWORK
+    net = decrypt_network_pdu(sim.keys, payload, 0)
+    assert (net.src, net.dst) == (node.unicast, CLIENT)
+    lower = parse_lower_access(net.transport_pdu)
+    access = decrypt_upper(
+        APP_KEY, akf=1, szmic=0, seq=net.seq, src=net.src, dst=CLIENT, iv_index=0, upper=lower.data
+    )
+    assert access == bytes.fromhex("820401")
+    assert node.on
+    assert sim.filter_addresses == {CLIENT}  # auto-added from the client's src
+
+
+def test_proxy_filter_messages():
+    sim = SimMesh()
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        for seq, message in enumerate((set_filter_type(FILTER_ACCEPT), add_addresses(CLIENT))):
+            pdu = encrypt_proxy_config(sim.keys, seq=seq, src=CLIENT, iv_index=0, message=message)
+            for part in proxy_pdus(PDU_PROXY_CONFIG, pdu, transport.max_write):
+                await transport.write(part)
+        await asyncio.sleep(0)
+        return messages(received)
+
+    replies = run(scenario())
+    assert [pdu_type for pdu_type, _ in replies] == [PDU_PROXY_CONFIG, PDU_PROXY_CONFIG]
+    statuses = [
+        parse_filter_status(decrypt_proxy_config(sim.keys, payload, 0).transport_pdu)
+        for _, payload in replies
+    ]
+    assert statuses == [FilterStatus(FILTER_ACCEPT, 0), FilterStatus(FILTER_ACCEPT, 1)]
+    assert sim.filter_addresses == {CLIENT}
