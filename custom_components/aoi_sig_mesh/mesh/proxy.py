@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .errors import LinkClosedError, MeshError, MeshTimeout
@@ -28,11 +28,15 @@ from .pdu import (
 )
 from .transport import (
     MAX_UNSEGMENTED_ACCESS,
+    SEQ_ZERO_MASK,
+    SegmentAck,
     SegmentReassembler,
     decrypt_upper,
     encrypt_upper,
     make_segment_ack,
     parse_lower_access,
+    parse_segment_ack,
+    segmented_access,
     unsegmented_access,
 )
 
@@ -43,6 +47,8 @@ DEFAULT_TTL = 5
 REQUEST_TIMEOUT = 2.0
 REQUEST_ATTEMPTS = 3
 FILTER_TIMEOUT = 2.0
+SEGMENT_ACK_TIMEOUT = 1.0
+SEGMENT_RETRANSMITS = 2
 
 GROUP_ADDRESS_MIN = 0xC000  # group addresses, including all-nodes 0xFFFF
 
@@ -75,6 +81,17 @@ class AccessMessage:
     dev_key: bool  # True when it was encrypted with the node's DevKey (Config messages)
 
 
+@dataclass
+class _Outgoing:
+    """A segmented message waiting for its Segment Acks."""
+
+    dst: int
+    seq_zero: int
+    acked: int = 0
+    rejected: bool = False
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 class ProxyLink:
     """One proxy connection: sends access messages, matches responses, dispatches the rest.
 
@@ -104,6 +121,8 @@ class ProxyLink:
         self._filter_event = asyncio.Event()
         self._filter_status: FilterStatus | None = None
         self._write_lock = asyncio.Lock()
+        self._segment_lock = asyncio.Lock()
+        self._outgoing: _Outgoing | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
         self.filter_ok = False
@@ -141,7 +160,8 @@ class ProxyLink:
         key = dev_key or network.app_key
         aid = 0 if dev_key else network.aid
         if len(access) > MAX_UNSEGMENTED_ACCESS:
-            raise MeshError(f"{len(access)}-byte access message needs segmentation")
+            await self._send_segmented(dst, access, akf=akf, key=key, aid=aid)
+            return
         # No await between taking the seq and queueing on the (FIFO) write lock, so PDUs
         # leave in seq order: nodes drop an older seq that arrives after a newer one.
         seq = network.next_seq()
@@ -217,6 +237,53 @@ class ProxyLink:
         except TimeoutError:
             return None
         return self._filter_status
+
+    async def _send_segmented(
+        self, dst: int, access: bytes, *, akf: int, key: bytes, aid: int
+    ) -> None:
+        """Send a segmented access message and wait until every segment is acked."""
+        network = self._network
+        async with self._segment_lock:  # one segmented message in flight at a time
+            seq_auth = network.next_seq()
+            iv_index = network.tx_iv_index
+            upper = encrypt_upper(
+                key,
+                akf=akf,
+                szmic=0,
+                seq=seq_auth,
+                src=network.address,
+                dst=dst,
+                iv_index=iv_index,
+                access_payload=access,
+            )
+            seq_zero = seq_auth & SEQ_ZERO_MASK
+            segments = segmented_access(upper, akf=akf, aid=aid, szmic=0, seq_zero=seq_zero)
+            complete = (1 << len(segments)) - 1
+            outgoing = self._outgoing = _Outgoing(dst, seq_zero)
+            try:
+                for round_index in range(1 + SEGMENT_RETRANSMITS):
+                    outgoing.event.clear()
+                    for seg_o, segment in enumerate(segments):
+                        if outgoing.acked >> seg_o & 1:
+                            continue
+                        # Only the first send of segment 0 carries SeqAuth; every other
+                        # send (other segments, retransmits) takes a new seq.
+                        first = round_index == 0 and seg_o == 0
+                        seq = seq_auth if first else network.next_seq()
+                        await self._send_network(dst, segment, seq=seq, iv_index=iv_index)
+                    try:
+                        await asyncio.wait_for(outgoing.event.wait(), SEGMENT_ACK_TIMEOUT)
+                    except TimeoutError:
+                        continue
+                    if self._closed:
+                        raise LinkClosedError("proxy link closed")
+                    if outgoing.rejected:
+                        raise MeshError(f"0x{dst:04X} rejected the segmented message")
+                    if outgoing.acked & complete == complete:
+                        return
+                raise MeshTimeout(f"0x{dst:04X} did not ack all {len(segments)} segments")
+            finally:
+                self._outgoing = None
 
     async def _send_proxy_config(self, message: bytes) -> None:
         network = self._network
@@ -320,7 +387,10 @@ class ProxyLink:
         if not network.accept_replay(net.src, net.seq, iv_index):
             return
         if net.ctl:
-            return  # no control messages we act on
+            ack = parse_segment_ack(net.transport_pdu)
+            if ack is not None and net.dst == network.address:
+                self._on_segment_ack(net.src, ack)
+            return
         lower = parse_lower_access(net.transport_pdu)
         if not lower.seg:
             self._on_upper(net.src, net.dst, iv_index, lower.akf, lower.aid, 0, net.seq, lower.data)
@@ -340,6 +410,15 @@ class ProxyLink:
                 done.seq_auth,
                 done.upper,
             )
+
+    def _on_segment_ack(self, src: int, ack: SegmentAck) -> None:
+        outgoing = self._outgoing
+        if outgoing is None or src != outgoing.dst or ack.seq_zero != outgoing.seq_zero:
+            return
+        if ack.block_ack == 0:
+            outgoing.rejected = True  # the receiver cannot take the message
+        outgoing.acked |= ack.block_ack
+        outgoing.event.set()
 
     def _on_upper(
         self,
@@ -391,6 +470,8 @@ class ProxyLink:
                 if not future.done():
                     future.set_exception(LinkClosedError("proxy link closed"))
         self._filter_event.set()
+        if self._outgoing is not None:
+            self._outgoing.event.set()
         for task in self._tasks:
             task.cancel()
         if notify and self._on_close is not None:
