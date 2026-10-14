@@ -273,8 +273,11 @@ class ProxyLink:
                             continue
                         # Only the first send of segment 0 carries SeqAuth; every other
                         # send (other segments, retransmits) takes a new seq.
-                        first = round_index == 0 and seg_o == 0
-                        seq = seq_auth if first else network.next_seq()
+                        if round_index == 0 and seg_o == 0:
+                            seq = seq_auth
+                        else:
+                            self._check_tx_iv_index(iv_index)
+                            seq = network.next_seq()
                         await self._send_network(dst, segment, seq=seq, iv_index=iv_index)
                     try:
                         await asyncio.wait_for(outgoing.event.wait(), SEGMENT_ACK_TIMEOUT)
@@ -289,6 +292,15 @@ class ProxyLink:
                 raise MeshTimeout(f"0x{dst:04X} did not ack all {len(segments)} segments")
             finally:
                 self._outgoing = None
+
+    def _check_tx_iv_index(self, iv_index: int) -> None:
+        """Abort a segmented send once the transmit IV index has moved on under it.
+
+        An IV Update that completes resets seq to 0. Its segments must keep SeqAuth's IV
+        index, so a new seq there would reuse an (IV index, seq) pair: AES-CCM nonce reuse.
+        """
+        if self._network.tx_iv_index != iv_index:
+            raise MeshError("IV index changed during a segmented send")
 
     async def _send_proxy_config(self, message: bytes) -> None:
         network = self._network

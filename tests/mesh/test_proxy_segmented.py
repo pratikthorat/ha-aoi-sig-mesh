@@ -87,3 +87,44 @@ def test_link_drop_during_segmented_send_raises_promptly():
             await asyncio.wait_for(sending, 0.2)  # well under SEGMENT_ACK_TIMEOUT (1 s)
 
     run(scenario())
+
+
+def record_network_pdus(monkeypatch):
+    """Record the (IV index, seq) of every network PDU the link encrypts."""
+    sent = []
+    encrypt = proxy.encrypt_network_pdu
+
+    def recording(keys, **kwargs):
+        sent.append((kwargs["iv_index"], kwargs["seq"]))
+        return encrypt(keys, **kwargs)
+
+    monkeypatch.setattr(proxy, "encrypt_network_pdu", recording)
+    return sent
+
+
+def test_iv_update_completing_mid_send_never_reuses_a_seq(monkeypatch):
+    monkeypatch.setattr(proxy, "SEGMENT_ACK_TIMEOUT", 0.05)
+    sent = record_network_pdus(monkeypatch)
+    sim = SimMesh(iv_index=1, iv_update=True)
+    node = sim.add_node("ctl", configured=False)
+    sim.silent = True
+
+    async def scenario():
+        network, _, link = make_link(sim)
+        sending = asyncio.ensure_future(
+            link.send(node.unicast, config_appkey_add(0, 0, APP_KEY), dev_key=node.dev_key)
+        )
+        await asyncio.sleep(0.01)  # the first round is out, waiting for acks
+        sim.iv_update = False
+        sim.send_beacon()  # the IV Update completes: seq restarts at 0 under IV index 1
+        await asyncio.sleep(0.01)
+        assert network.tx_iv_index == 1
+        with pytest.raises(MeshError) as caught:
+            await sending
+        return caught.value, link
+
+    error, link = run(scenario())
+    assert sent[:2] == [(0, 0), (0, 1)]  # the first round, before the beacon
+    assert len(sent) == len(set(sent)), sent  # no (IV index, seq) pair is used twice
+    assert not isinstance(error, MeshTimeout)
+    assert link._outgoing is None
