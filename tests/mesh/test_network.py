@@ -1,7 +1,8 @@
 import pytest
 
 from mesh.errors import MeshError
-from mesh.network import SEQ_MAX, MeshNetwork
+from mesh.network import SEQ_MAX, BeaconOutcome, MeshNetwork
+from mesh.pdu import SecureBeacon
 
 NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
 APP_KEY = bytes.fromhex("63964771734fbd76e3b40519d1d94a48")
@@ -132,3 +133,76 @@ def test_replay_cache_round_trips_through_state():
     state = net.persistent_state()
     assert state["replay"] == {"176": [0, 7]}
     assert not make(state=state).accept_replay(0x00B0, 7, 0)
+
+
+def beacon(iv_index, iv_update=False):
+    return SecureBeacon(key_refresh=False, iv_update=iv_update, iv_index=iv_index)
+
+
+def test_rx_iv_index_follows_ivi():
+    net = make(state={"iv_index": 5})
+    assert (net.rx_iv_index(1), net.rx_iv_index(0)) == (5, 4)
+    fresh = make()
+    assert (fresh.rx_iv_index(0), fresh.rx_iv_index(1)) == (0, None)
+
+
+def test_tx_iv_index():
+    assert make(state={"iv_index": 5}).tx_iv_index == 5
+    assert make(state={"iv_index": 5, "iv_update": True}).tx_iv_index == 4
+    assert make(state={"iv_index": 0, "iv_update": True}).tx_iv_index == 0
+
+
+def test_receive_during_iv_update_accepts_old_and_new():
+    net = make(state={"iv_index": 6, "iv_update": True})
+    assert (net.rx_iv_index(0), net.rx_iv_index(1)) == (6, 5)
+
+
+def test_beacon_starts_iv_update_and_keeps_seq():
+    saved = []
+    net = make(saved=saved)
+    used = net.next_seq()
+    assert net.apply_beacon(beacon(1, iv_update=True)) is BeaconOutcome.UPDATED
+    assert (net.iv_index, net.iv_update, net.tx_iv_index) == (1, True, 0)
+    assert net.next_seq() > used  # still sending with IV index 0
+    assert saved[-1]["iv_index"] == 1
+    assert saved[-1]["iv_update"] is True
+
+
+def test_beacon_ends_iv_update_and_resets_seq():
+    saved = []
+    net = make(state={"iv_index": 1, "iv_update": True, "seq": 500}, saved=saved)
+    assert net.apply_beacon(beacon(1)) is BeaconOutcome.UPDATED
+    assert (net.iv_update, net.tx_iv_index) == (False, 1)
+    assert net.next_seq() == 0
+    assert saved[0]["iv_update"] is False
+
+
+def test_beacon_one_step_ahead_in_normal_state_resets_seq():
+    net = make(state={"iv_index": 1, "seq": 500})
+    assert net.apply_beacon(beacon(2)) is BeaconOutcome.UPDATED
+    assert (net.iv_index, net.iv_update) == (2, False)
+    assert net.next_seq() == 0
+
+
+def test_beacon_same_iv_with_update_flag_enters_update():
+    net = make(state={"iv_index": 1, "seq": 500})
+    assert net.apply_beacon(beacon(1, iv_update=True)) is BeaconOutcome.UPDATED
+    assert (net.iv_update, net.tx_iv_index) == (True, 0)
+    assert net.next_seq() == 500
+
+
+def test_beacon_with_nothing_new_is_unchanged():
+    saved = []
+    net = make(state={"iv_index": 1}, saved=saved)
+    assert net.apply_beacon(beacon(1)) is BeaconOutcome.UNCHANGED
+    assert net.apply_beacon(beacon(0)) is BeaconOutcome.UNCHANGED
+    assert net.apply_beacon(beacon(0, iv_update=True)) is BeaconOutcome.UNCHANGED
+    assert saved == []
+
+
+def test_beacon_jump_too_far_is_not_applied():
+    saved = []
+    net = make(state={"iv_index": 1}, saved=saved)
+    assert net.apply_beacon(beacon(3)) is BeaconOutcome.TOO_FAR
+    assert (net.iv_index, net.iv_update) == (1, False)
+    assert saved == []

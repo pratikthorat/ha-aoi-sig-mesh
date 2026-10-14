@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import enum
 from collections.abc import Callable
 from typing import Any
 
 from .crypto import k4
 from .errors import MeshError
-from .pdu import NetworkKeys
+from .pdu import NetworkKeys, SecureBeacon
 
 SEQ_BLOCK = 64
 SEQ_MAX = 0xFFFFFF
+
+
+class BeaconOutcome(enum.Enum):
+    UNCHANGED = "unchanged"
+    UPDATED = "updated"
+    TOO_FAR = "too_far"  # more than one IV step ahead: reported, never applied
 
 
 class MeshNetwork:
@@ -94,3 +101,46 @@ class MeshNetwork:
         """Clear the cache for a node's elements, e.g. after it is reset and re-provisioned."""
         for src in range(first, first + count):
             self._replay.pop(src, None)
+
+    @property
+    def iv_index(self) -> int:
+        return self._iv_index
+
+    @property
+    def iv_update(self) -> bool:
+        return self._iv_update
+
+    @property
+    def tx_iv_index(self) -> int:
+        """While an IV Update is in progress we keep sending with the old IV index."""
+        if self._iv_update and self._iv_index > 0:
+            return self._iv_index - 1
+        return self._iv_index
+
+    def rx_iv_index(self, ivi: int) -> int | None:
+        """The IV index a received PDU used, picked by its IVI bit."""
+        if ivi == (self._iv_index & 1):
+            return self._iv_index
+        return self._iv_index - 1 if self._iv_index > 0 else None
+
+    def _reset_seq(self) -> None:
+        self._seq = 0
+        self._ceiling = 0
+
+    def apply_beacon(self, beacon: SecureBeacon) -> BeaconOutcome:
+        """Apply a verified Secure Network Beacon (IV Update procedure)."""
+        if beacon.iv_index > self._iv_index + 1:
+            return BeaconOutcome.TOO_FAR
+        if beacon.iv_index == self._iv_index + 1:
+            self._iv_index = beacon.iv_index
+            self._iv_update = beacon.iv_update
+            if not beacon.iv_update:
+                self._reset_seq()
+        elif beacon.iv_index == self._iv_index and beacon.iv_update != self._iv_update:
+            self._iv_update = beacon.iv_update
+            if not beacon.iv_update:
+                self._reset_seq()
+        else:
+            return BeaconOutcome.UNCHANGED
+        self._persist()
+        return BeaconOutcome.UPDATED
