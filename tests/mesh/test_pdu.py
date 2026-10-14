@@ -204,3 +204,13 @@ def test_parse_filter_status():
     assert parse_filter_status(bytes.fromhex("03000001")) == FilterStatus(0, 1)
     assert parse_filter_status(bytes.fromhex("030000")) is None
     assert parse_filter_status(bytes.fromhex("04000001")) is None
+
+
+@pytest.mark.parametrize("iv_index", [-1, 0x1_0000_0001])
+def test_decrypt_returns_none_for_out_of_range_iv_index(iv_index):
+    pdu = encrypt_network_pdu(
+        KEYS, ctl=1, ttl=0, seq=1, src=0x1201, dst=0xFFFD, transport_pdu=b"\x00\x00", iv_index=1
+    )
+    assert decrypt_network_pdu(KEYS, pdu, iv_index) is None
+    config = encrypt_proxy_config(KEYS, seq=7, src=0x0001, iv_index=1, message=b"\x00\x00")
+    assert decrypt_proxy_config(KEYS, config, iv_index) is None

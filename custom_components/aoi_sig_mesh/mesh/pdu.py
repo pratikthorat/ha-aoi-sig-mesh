@@ -24,6 +24,7 @@ NONCE_PROXY = 0x03
 
 MIN_NETWORK_PDU = 14  # IVI/NID + 6 obfuscated + DST + 1 transport byte + 32-bit MIC
 MAX_PROXY_MESSAGE = 512
+MAX_IV_INDEX = 0xFFFFFFFF
 
 
 @dataclass(frozen=True, repr=False)
@@ -99,7 +100,7 @@ def decrypt_network_pdu(
     keys: NetworkKeys, pdu: bytes, iv_index: int, *, nonce_type: int = NONCE_NETWORK
 ) -> NetworkPDU | None:
     """Deobfuscate and decrypt a network PDU; None if it is not ours or does not verify."""
-    if len(pdu) < MIN_NETWORK_PDU:
+    if len(pdu) < MIN_NETWORK_PDU or not 0 <= iv_index <= MAX_IV_INDEX:
         return None
     ivi, nid = pdu[0] >> 7, pdu[0] & 0x7F
     if nid != keys.nid or ivi != (iv_index & 1):
