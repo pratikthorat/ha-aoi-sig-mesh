@@ -3,7 +3,8 @@ import json
 import pytest
 
 from mesh.config import CompositionData, Element
-from mesh.node import MeshNode, locate_models
+from mesh.errors import MeshError
+from mesh.node import MeshNode, allocate_unicast, locate_models
 
 DEV_KEY = bytes.fromhex("9d6dd0e96eb25dc19a40ed9914f8f03f")
 VENDOR_MODEL = (0x07D0 << 16) | 0x0004
@@ -81,3 +82,25 @@ def test_node_validates():
         MeshNode(unicast=0x7FFF, element_count=2, dev_key=DEV_KEY)
     with pytest.raises(ValueError):
         MeshNode(unicast=0x00B0, element_count=0, dev_key=DEV_KEY)
+
+
+def test_allocate_unicast_finds_the_lowest_gap():
+    assert allocate_unicast([], 2) == 0x0001
+    assert allocate_unicast([(1, 1), (2, 2)], 1) == 0x0004
+    assert allocate_unicast([(5, 2), (1, 1)], 3) == 0x0002  # unsorted input, gap 2..4
+    assert allocate_unicast([(1, 1), (5, 2)], 4) == 0x0007  # gap too small, go past 5..6
+    assert allocate_unicast([(1, 1)], 1, low=0x0010) == 0x0010
+
+
+def test_allocate_unicast_full_raises():
+    with pytest.raises(MeshError):
+        allocate_unicast([(1, 0x7FFF)], 1)
+    with pytest.raises(MeshError):
+        allocate_unicast([], 2, low=0x7FFF)
+    with pytest.raises(MeshError):
+        allocate_unicast([(2, 1)], 1, low=0x0002, high=0x0002)
+
+
+def test_allocate_unicast_rejects_empty_request():
+    with pytest.raises(ValueError):
+        allocate_unicast([], 0)

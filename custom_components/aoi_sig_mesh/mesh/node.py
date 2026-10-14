@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 from .config import CompositionData
+from .errors import MeshError
 from .models import (
     MODEL_GENERIC_ONOFF_SERVER,
     MODEL_HEALTH_SERVER,
@@ -112,3 +114,23 @@ class MeshNode:
             kelvin_min=int(data.get("kelvin_min", KELVIN_DEFAULT_MIN)),
             kelvin_max=int(data.get("kelvin_max", KELVIN_DEFAULT_MAX)),
         )
+
+
+def allocate_unicast(
+    used: Iterable[tuple[int, int]],
+    count: int,
+    *,
+    low: int = 0x0001,
+    high: int = UNICAST_MAX,
+) -> int:
+    """Lowest start address in [low, high] with ``count`` free addresses after it."""
+    if count < 1:
+        raise ValueError("a node needs at least one element")
+    candidate = low
+    for start, size in sorted(used):
+        if candidate + count - 1 < start:
+            break
+        candidate = max(candidate, start + size)
+    if candidate + count - 1 > high:
+        raise MeshError(f"no {count} free unicast addresses between 0x{low:04X} and 0x{high:04X}")
+    return candidate
