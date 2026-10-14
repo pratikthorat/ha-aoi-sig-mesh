@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .crypto import ccm_decrypt, ccm_encrypt
 from .errors import MalformedPDUError, MeshAuthError
@@ -147,3 +147,73 @@ def parse_segment_ack(pdu: bytes) -> SegmentAck | None:
     return SegmentAck(
         bool(head >> 15), (head >> 2) & SEQ_ZERO_MASK, int.from_bytes(pdu[3:7], "big")
     )
+
+
+@dataclass(frozen=True)
+class Reassembled:
+    seq_auth: int
+    akf: int
+    aid: int
+    szmic: int
+    upper: bytes
+
+
+@dataclass(frozen=True)
+class SegmentResult:
+    message: Reassembled | None
+    block_ack: int
+    seq_zero: int
+    send_ack: bool
+
+
+@dataclass
+class _Partial:
+    seq_auth: int
+    seg_n: int
+    akf: int
+    aid: int
+    szmic: int
+    parts: dict[int, bytes] = field(default_factory=dict)
+
+    @property
+    def block_ack(self) -> int:
+        return sum(1 << seg_o for seg_o in self.parts)
+
+
+class SegmentReassembler:
+    """Per-source segment reassembly with duplicate re-acks and stale-segment rejection."""
+
+    def __init__(self) -> None:
+        self._partial: dict[int, _Partial] = {}
+        self._done: dict[int, tuple[int, int]] = {}  # src -> (seq_auth, block_ack)
+
+    def add(self, src: int, net_seq: int, seg: LowerAccess) -> SegmentResult:
+        ignore = SegmentResult(None, 0, seg.seq_zero, False)
+        seq_auth = seq_auth_from_segment(net_seq, seg.seq_zero)
+        if seq_auth is None:
+            return ignore
+        done = self._done.get(src)
+        if done is not None:
+            if seq_auth == done[0]:
+                return SegmentResult(None, done[1], seg.seq_zero, True)
+            if seq_auth < done[0]:
+                return ignore
+        partial = self._partial.get(src)
+        if partial is not None and seq_auth < partial.seq_auth:
+            return ignore
+        if partial is None or seq_auth > partial.seq_auth:
+            partial = _Partial(seq_auth, seg.seg_n, seg.akf, seg.aid, seg.szmic)
+            self._partial[src] = partial
+        if seg.seg_n != partial.seg_n:
+            return ignore
+        if seg.seg_o < seg.seg_n and len(seg.data) != SEGMENT_SIZE:
+            return ignore
+        partial.parts[seg.seg_o] = seg.data
+        if len(partial.parts) <= partial.seg_n:
+            return SegmentResult(None, partial.block_ack, seg.seq_zero, False)
+        upper = b"".join(partial.parts[i] for i in range(partial.seg_n + 1))
+        block_ack = partial.block_ack
+        del self._partial[src]
+        self._done[src] = (seq_auth, block_ack)
+        message = Reassembled(seq_auth, partial.akf, partial.aid, partial.szmic, upper)
+        return SegmentResult(message, block_ack, seg.seq_zero, True)

@@ -4,7 +4,9 @@ from mesh.errors import MalformedPDUError
 from mesh.transport import (
     SEGMENT_SIZE,
     LowerAccess,
+    Reassembled,
     SegmentAck,
+    SegmentReassembler,
     decrypt_upper,
     encrypt_upper,
     make_segment_ack,
@@ -125,3 +127,91 @@ def test_parse_segment_ack_round_trip():
 )
 def test_parse_segment_ack_rejects(pdu):
     assert parse_segment_ack(pdu) is None
+
+
+UPPER = bytes(range(30))  # 3 segments: 12 + 12 + 6
+
+
+def _segments(seq_auth, upper=UPPER):
+    pdus = segmented_access(upper, akf=1, aid=0x26, szmic=0, seq_zero=seq_auth & 0x1FFF)
+    return [(seq_auth + i, parse_lower_access(p)) for i, p in enumerate(pdus)]
+
+
+def test_reassembles_in_order():
+    rx = SegmentReassembler()
+    segs = _segments(100)
+    first = rx.add(0x00B0, *segs[0])
+    assert (first.message, first.block_ack, first.send_ack) == (None, 0b001, False)
+    assert rx.add(0x00B0, *segs[1]).block_ack == 0b011
+    done = rx.add(0x00B0, *segs[2])
+    assert done.message == Reassembled(100, 1, 0x26, 0, UPPER)
+    assert (done.block_ack, done.seq_zero, done.send_ack) == (0b111, 100, True)
+
+
+def test_reassembles_out_of_order():
+    rx = SegmentReassembler()
+    segs = _segments(100)
+    rx.add(0x00B0, *segs[2])
+    rx.add(0x00B0, *segs[0])
+    assert rx.add(0x00B0, *segs[1]).message.upper == UPPER
+
+
+def test_retransmitted_segments_with_new_seqs_complete_the_message():
+    rx = SegmentReassembler()
+    segs = _segments(100)
+    rx.add(0x00B0, *segs[0])
+    rx.add(0x00B0, *segs[1])
+    late = segs[2][1]
+    assert rx.add(0x00B0, 150, late).message.seq_auth == 100  # resent later with seq 150
+
+
+def test_duplicate_after_completion_is_reacked_not_redelivered():
+    rx = SegmentReassembler()
+    for seg in _segments(100):
+        rx.add(0x00B0, *seg)
+    again = rx.add(0x00B0, *_segments(100)[1])
+    assert (again.message, again.block_ack, again.send_ack) == (None, 0b111, True)
+
+
+def test_older_message_is_ignored():
+    rx = SegmentReassembler()
+    for seg in _segments(200):
+        rx.add(0x00B0, *seg)
+    old = rx.add(0x00B0, *_segments(100)[0])
+    assert (old.message, old.block_ack, old.send_ack) == (None, 0, False)
+
+
+def test_newer_message_replaces_unfinished_one():
+    rx = SegmentReassembler()
+    rx.add(0x00B0, *_segments(100)[0])
+    segs = _segments(300)
+    for seg in segs[:-1]:
+        rx.add(0x00B0, *seg)
+    assert rx.add(0x00B0, *segs[-1]).message.seq_auth == 300
+    stale = rx.add(0x00B0, *_segments(100)[1])  # a straggler from the abandoned message
+    assert (stale.message, stale.send_ack) == (None, False)
+
+
+def test_sources_are_independent():
+    rx = SegmentReassembler()
+    a, b = _segments(100), _segments(100)
+    rx.add(0x00B0, *a[0])
+    rx.add(0x00C0, *b[0])
+    rx.add(0x00B0, *a[1])
+    assert rx.add(0x00B0, *a[2]).message is not None
+    assert rx.add(0x00C0, *b[1]).message is None
+
+
+def test_inconsistent_segments_are_ignored():
+    rx = SegmentReassembler()
+    rx.add(0x00B0, *_segments(100)[0])
+    other_shape = _segments(100, upper=bytes(40))[1]  # SegN 3 instead of 2
+    assert rx.add(0x00B0, *other_shape).block_ack == 0
+    short = LowerAccess(True, 1, 0x26, 0, 100, 1, 2, b"\x00" * 5)  # middle segment, not 12 bytes
+    assert rx.add(0x00B0, 101, short).block_ack == 0
+
+
+def test_unrecoverable_seq_auth_is_ignored():
+    seg = parse_lower_access(segmented_access(UPPER, akf=1, aid=0, szmic=0, seq_zero=0x1FFE)[0])
+    result = SegmentReassembler().add(0x00B0, 5, seg)
+    assert (result.message, result.send_ack) == (None, False)
