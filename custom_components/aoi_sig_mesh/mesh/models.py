@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 
 from .errors import MalformedPDUError
 
@@ -195,3 +196,97 @@ def ctl_temperature_range_get() -> bytes:
 def health_attention_set(seconds: int, *, ack: bool = False) -> bytes:
     opcode = OP_HEALTH_ATTENTION_SET if ack else OP_HEALTH_ATTENTION_SET_UNACK
     return encode_opcode(opcode) + bytes([min(max(seconds, 0), 0xFF)])
+
+
+@dataclass(frozen=True)
+class OnOffStatus:
+    present: bool
+    target: bool | None
+    remaining_ms: int | None
+
+
+@dataclass(frozen=True)
+class LightnessStatus:
+    present: int
+    target: int | None
+    remaining_ms: int | None
+
+
+@dataclass(frozen=True)
+class CTLStatus:
+    present_lightness: int
+    present_kelvin: int
+    target_lightness: int | None
+    target_kelvin: int | None
+    remaining_ms: int | None
+
+
+@dataclass(frozen=True)
+class CTLTemperatureStatus:
+    present_kelvin: int
+    present_delta_uv: int
+    target_kelvin: int | None
+    target_delta_uv: int | None
+    remaining_ms: int | None
+
+
+@dataclass(frozen=True)
+class CTLTemperatureRangeStatus:
+    status_code: int
+    min_kelvin: int
+    max_kelvin: int
+
+
+def _bad_length(name: str, params: bytes) -> MalformedPDUError:
+    return MalformedPDUError(f"{name} with {len(params)} parameter bytes")
+
+
+def parse_onoff_status(params: bytes) -> OnOffStatus:
+    if len(params) == 1:
+        return OnOffStatus(bool(params[0]), None, None)
+    if len(params) == 3:
+        return OnOffStatus(bool(params[0]), bool(params[1]), decode_transition(params[2]))
+    raise _bad_length("Generic OnOff Status", params)
+
+
+def parse_lightness_status(params: bytes) -> LightnessStatus:
+    if len(params) == 2:
+        return LightnessStatus(struct.unpack("<H", params)[0], None, None)
+    if len(params) == 5:
+        present, target, remaining = struct.unpack("<HHB", params)
+        return LightnessStatus(present, target, decode_transition(remaining))
+    raise _bad_length("Light Lightness Status", params)
+
+
+def parse_ctl_status(params: bytes) -> CTLStatus:
+    if len(params) == 4:
+        lightness, kelvin = struct.unpack("<HH", params)
+        return CTLStatus(lightness, kelvin, None, None, None)
+    if len(params) == 9:
+        lightness, kelvin, t_lightness, t_kelvin, remaining = struct.unpack("<HHHHB", params)
+        return CTLStatus(lightness, kelvin, t_lightness, t_kelvin, decode_transition(remaining))
+    raise _bad_length("Light CTL Status", params)
+
+
+def parse_ctl_temperature_status(params: bytes) -> CTLTemperatureStatus:
+    if len(params) == 4:
+        kelvin, delta_uv = struct.unpack("<Hh", params)
+        return CTLTemperatureStatus(kelvin, delta_uv, None, None, None)
+    if len(params) == 9:
+        kelvin, delta_uv, t_kelvin, t_delta_uv, remaining = struct.unpack("<HhHhB", params)
+        return CTLTemperatureStatus(
+            kelvin, delta_uv, t_kelvin, t_delta_uv, decode_transition(remaining)
+        )
+    raise _bad_length("Light CTL Temperature Status", params)
+
+
+def parse_ctl_temperature_range_status(params: bytes) -> CTLTemperatureRangeStatus:
+    if len(params) != 5:
+        raise _bad_length("Light CTL Temperature Range Status", params)
+    return CTLTemperatureRangeStatus(*struct.unpack("<BHH", params))
+
+
+def parse_attention_status(params: bytes) -> int:
+    if len(params) != 1:
+        raise _bad_length("Health Attention Status", params)
+    return params[0]

@@ -2,6 +2,11 @@ import pytest
 
 from mesh.errors import MalformedPDUError
 from mesh.models import (
+    CTLStatus,
+    CTLTemperatureRangeStatus,
+    CTLTemperatureStatus,
+    LightnessStatus,
+    OnOffStatus,
     ctl_get,
     ctl_set,
     ctl_temperature_get,
@@ -15,6 +20,12 @@ from mesh.models import (
     lightness_set,
     onoff_get,
     onoff_set,
+    parse_attention_status,
+    parse_ctl_status,
+    parse_ctl_temperature_range_status,
+    parse_ctl_temperature_status,
+    parse_lightness_status,
+    parse_onoff_status,
     parse_opcode,
 )
 
@@ -116,3 +127,59 @@ def test_builders_validate_ranges():
         lightness_set(70_000, 1)
     with pytest.raises(ValueError):
         lightness_set(-1, 1)
+
+
+def test_parse_onoff_status():
+    assert parse_onoff_status(b"\x01") == OnOffStatus(True, None, None)
+    assert parse_onoff_status(b"\x00\x01\x0a") == OnOffStatus(False, True, 1_000)
+
+
+def test_parse_lightness_status():
+    assert parse_lightness_status(bytes.fromhex("0080")) == LightnessStatus(0x8000, None, None)
+    assert parse_lightness_status(bytes.fromhex("0080ffff0a")) == LightnessStatus(
+        0x8000, 0xFFFF, 1_000
+    )
+
+
+def test_parse_ctl_status():
+    assert parse_ctl_status(bytes.fromhex("ffffa00f")) == CTLStatus(0xFFFF, 4000, None, None, None)
+    assert parse_ctl_status(bytes.fromhex("ffffa00f00108c0a3f")) == CTLStatus(
+        0xFFFF, 4000, 0x1000, 2700, None
+    )
+
+
+def test_parse_ctl_temperature_status():
+    assert parse_ctl_temperature_status(bytes.fromhex("8c0affff")) == CTLTemperatureStatus(
+        2700, -1, None, None, None
+    )
+    assert parse_ctl_temperature_status(bytes.fromhex("8c0a0000641900000a")) == (
+        CTLTemperatureStatus(2700, 0, 6500, 0, 1_000)
+    )
+
+
+def test_parse_ctl_temperature_range_status():
+    assert parse_ctl_temperature_range_status(bytes.fromhex("008c0a6419")) == (
+        CTLTemperatureRangeStatus(0, 2700, 6500)
+    )
+
+
+def test_parse_attention_status():
+    assert parse_attention_status(b"\x05") == 5
+
+
+@pytest.mark.parametrize(
+    ("parser", "params"),
+    [
+        (parse_onoff_status, ""),
+        (parse_onoff_status, "0001"),
+        (parse_lightness_status, "00"),
+        (parse_lightness_status, "00800080"),
+        (parse_ctl_status, "ffffa0"),
+        (parse_ctl_temperature_status, "8c0a00000000"),
+        (parse_ctl_temperature_range_status, "008c0a64"),
+        (parse_attention_status, ""),
+    ],
+)
+def test_status_parsers_reject_bad_lengths(parser, params):
+    with pytest.raises(MalformedPDUError):
+        parser(bytes.fromhex(params))
