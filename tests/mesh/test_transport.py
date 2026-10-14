@@ -140,78 +140,117 @@ def _segments(seq_auth, upper=UPPER):
 def test_reassembles_in_order():
     rx = SegmentReassembler()
     segs = _segments(100)
-    first = rx.add(0x00B0, *segs[0])
+    first = rx.add(0x00B0, *segs[0], iv_index=0)
     assert (first.message, first.block_ack, first.send_ack) == (None, 0b001, False)
-    assert rx.add(0x00B0, *segs[1]).block_ack == 0b011
-    done = rx.add(0x00B0, *segs[2])
-    assert done.message == Reassembled(100, 1, 0x26, 0, UPPER)
+    assert rx.add(0x00B0, *segs[1], iv_index=0).block_ack == 0b011
+    done = rx.add(0x00B0, *segs[2], iv_index=0)
+    assert done.message == Reassembled(100, 1, 0x26, 0, UPPER, 0)
     assert (done.block_ack, done.seq_zero, done.send_ack) == (0b111, 100, True)
 
 
 def test_reassembles_out_of_order():
     rx = SegmentReassembler()
     segs = _segments(100)
-    rx.add(0x00B0, *segs[2])
-    rx.add(0x00B0, *segs[0])
-    assert rx.add(0x00B0, *segs[1]).message.upper == UPPER
+    rx.add(0x00B0, *segs[2], iv_index=0)
+    rx.add(0x00B0, *segs[0], iv_index=0)
+    assert rx.add(0x00B0, *segs[1], iv_index=0).message.upper == UPPER
 
 
 def test_retransmitted_segments_with_new_seqs_complete_the_message():
     rx = SegmentReassembler()
     segs = _segments(100)
-    rx.add(0x00B0, *segs[0])
-    rx.add(0x00B0, *segs[1])
+    rx.add(0x00B0, *segs[0], iv_index=0)
+    rx.add(0x00B0, *segs[1], iv_index=0)
     late = segs[2][1]
-    assert rx.add(0x00B0, 150, late).message.seq_auth == 100  # resent later with seq 150
+    assert (
+        rx.add(0x00B0, 150, late, iv_index=0).message.seq_auth == 100
+    )  # resent later with seq 150
 
 
 def test_duplicate_after_completion_is_reacked_not_redelivered():
     rx = SegmentReassembler()
     for seg in _segments(100):
-        rx.add(0x00B0, *seg)
-    again = rx.add(0x00B0, *_segments(100)[1])
+        rx.add(0x00B0, *seg, iv_index=0)
+    again = rx.add(0x00B0, *_segments(100)[1], iv_index=0)
     assert (again.message, again.block_ack, again.send_ack) == (None, 0b111, True)
 
 
 def test_older_message_is_ignored():
     rx = SegmentReassembler()
     for seg in _segments(200):
-        rx.add(0x00B0, *seg)
-    old = rx.add(0x00B0, *_segments(100)[0])
+        rx.add(0x00B0, *seg, iv_index=0)
+    old = rx.add(0x00B0, *_segments(100)[0], iv_index=0)
     assert (old.message, old.block_ack, old.send_ack) == (None, 0, False)
 
 
 def test_newer_message_replaces_unfinished_one():
     rx = SegmentReassembler()
-    rx.add(0x00B0, *_segments(100)[0])
+    rx.add(0x00B0, *_segments(100)[0], iv_index=0)
     segs = _segments(300)
     for seg in segs[:-1]:
-        rx.add(0x00B0, *seg)
-    assert rx.add(0x00B0, *segs[-1]).message.seq_auth == 300
-    stale = rx.add(0x00B0, *_segments(100)[1])  # a straggler from the abandoned message
+        rx.add(0x00B0, *seg, iv_index=0)
+    assert rx.add(0x00B0, *segs[-1], iv_index=0).message.seq_auth == 300
+    stale = rx.add(0x00B0, *_segments(100)[1], iv_index=0)  # a straggler from the abandoned message
     assert (stale.message, stale.send_ack) == (None, False)
 
 
 def test_sources_are_independent():
     rx = SegmentReassembler()
     a, b = _segments(100), _segments(100)
-    rx.add(0x00B0, *a[0])
-    rx.add(0x00C0, *b[0])
-    rx.add(0x00B0, *a[1])
-    assert rx.add(0x00B0, *a[2]).message is not None
-    assert rx.add(0x00C0, *b[1]).message is None
+    rx.add(0x00B0, *a[0], iv_index=0)
+    rx.add(0x00C0, *b[0], iv_index=0)
+    rx.add(0x00B0, *a[1], iv_index=0)
+    assert rx.add(0x00B0, *a[2], iv_index=0).message is not None
+    assert rx.add(0x00C0, *b[1], iv_index=0).message is None
 
 
 def test_inconsistent_segments_are_ignored():
     rx = SegmentReassembler()
-    rx.add(0x00B0, *_segments(100)[0])
+    rx.add(0x00B0, *_segments(100)[0], iv_index=0)
     other_shape = _segments(100, upper=bytes(40))[1]  # SegN 3 instead of 2
-    assert rx.add(0x00B0, *other_shape).block_ack == 0
+    assert rx.add(0x00B0, *other_shape, iv_index=0).block_ack == 0
     short = LowerAccess(True, 1, 0x26, 0, 100, 1, 2, b"\x00" * 5)  # middle segment, not 12 bytes
-    assert rx.add(0x00B0, 101, short).block_ack == 0
+    assert rx.add(0x00B0, 101, short, iv_index=0).block_ack == 0
 
 
 def test_unrecoverable_seq_auth_is_ignored():
     seg = parse_lower_access(segmented_access(UPPER, akf=1, aid=0, szmic=0, seq_zero=0x1FFE)[0])
-    result = SegmentReassembler().add(0x00B0, 5, seg)
+    result = SegmentReassembler().add(0x00B0, 5, seg, iv_index=0)
     assert (result.message, result.send_ack) == (None, False)
+
+
+def test_iv_update_with_seq_reset_is_accepted():
+    rx = SegmentReassembler()
+    for seg in _segments(5000):
+        rx.add(0x00B0, *seg, iv_index=0)
+    segs = _segments(10)
+    for seg in segs[:-1]:
+        rx.add(0x00B0, *seg, iv_index=1)
+    done = rx.add(0x00B0, *segs[-1], iv_index=1)
+    assert done.message == Reassembled(10, 1, 0x26, 0, UPPER, 1)
+    assert done.message.iv_index == 1
+
+
+def test_message_from_an_older_iv_index_is_ignored():
+    rx = SegmentReassembler()
+    for seg in _segments(10):
+        rx.add(0x00B0, *seg, iv_index=1)
+    old = rx.add(0x00B0, *_segments(5000)[0], iv_index=0)
+    assert (old.message, old.send_ack, old.block_ack) == (None, False, 0)
+
+
+def test_forget_lets_a_reprovisioned_node_start_over():
+    rx = SegmentReassembler()
+    outside = {src: _segments(100) for src in (0x00AF, 0x00B2, 0x00C0)}
+    for src, segs in outside.items():
+        rx.add(src, *segs[0], iv_index=0)  # partials that start before the forget
+    for seg in _segments(5000):
+        rx.add(0x00B0, *seg, iv_index=0)
+    rx.forget(0x00B0, 2)
+    segs = _segments(0)
+    for seg in segs[:-1]:
+        rx.add(0x00B0, *seg, iv_index=0)
+    assert rx.add(0x00B0, *segs[-1], iv_index=0).message.seq_auth == 0
+    for src, segs in outside.items():
+        rx.add(src, *segs[1], iv_index=0)
+        assert rx.add(src, *segs[2], iv_index=0).message is not None, hex(src)

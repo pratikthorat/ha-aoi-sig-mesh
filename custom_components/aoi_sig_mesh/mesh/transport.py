@@ -151,11 +151,12 @@ def parse_segment_ack(pdu: bytes) -> SegmentAck | None:
 
 @dataclass(frozen=True)
 class Reassembled:
-    seq_auth: int
+    seq_auth: int  # 24-bit SEQ of the first segment (the upper transport nonce uses it)
     akf: int
     aid: int
     szmic: int
     upper: bytes
+    iv_index: int  # IV index of the first segment; decrypt the upper PDU with it
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,9 @@ class SegmentResult:
 
 @dataclass
 class _Partial:
+    key: int  # (iv_index << 24) | seq_auth: the full SeqAuth, used for ordering
     seq_auth: int
+    iv_index: int
     seg_n: int
     akf: int
     aid: int
@@ -185,24 +188,31 @@ class SegmentReassembler:
 
     def __init__(self) -> None:
         self._partial: dict[int, _Partial] = {}
-        self._done: dict[int, tuple[int, int]] = {}  # src -> (seq_auth, block_ack)
+        self._done: dict[int, tuple[int, int]] = {}  # src -> (SeqAuth key, block_ack)
 
-    def add(self, src: int, net_seq: int, seg: LowerAccess) -> SegmentResult:
+    def forget(self, first: int, count: int) -> None:
+        """Drop segment state for a node's elements, e.g. after it is reset and re-provisioned."""
+        for src in range(first, first + count):
+            self._partial.pop(src, None)
+            self._done.pop(src, None)
+
+    def add(self, src: int, net_seq: int, seg: LowerAccess, *, iv_index: int) -> SegmentResult:
         ignore = SegmentResult(None, 0, seg.seq_zero, False)
         seq_auth = seq_auth_from_segment(net_seq, seg.seq_zero)
         if seq_auth is None:
             return ignore
+        key = (iv_index << 24) | seq_auth
         done = self._done.get(src)
         if done is not None:
-            if seq_auth == done[0]:
+            if key == done[0]:
                 return SegmentResult(None, done[1], seg.seq_zero, True)
-            if seq_auth < done[0]:
+            if key < done[0]:
                 return ignore
         partial = self._partial.get(src)
-        if partial is not None and seq_auth < partial.seq_auth:
+        if partial is not None and key < partial.key:
             return ignore
-        if partial is None or seq_auth > partial.seq_auth:
-            partial = _Partial(seq_auth, seg.seg_n, seg.akf, seg.aid, seg.szmic)
+        if partial is None or key > partial.key:
+            partial = _Partial(key, seq_auth, iv_index, seg.seg_n, seg.akf, seg.aid, seg.szmic)
             self._partial[src] = partial
         if seg.seg_n != partial.seg_n:
             return ignore
@@ -214,6 +224,8 @@ class SegmentReassembler:
         upper = b"".join(partial.parts[i] for i in range(partial.seg_n + 1))
         block_ack = partial.block_ack
         del self._partial[src]
-        self._done[src] = (seq_auth, block_ack)
-        message = Reassembled(seq_auth, partial.akf, partial.aid, partial.szmic, upper)
+        self._done[src] = (key, block_ack)
+        message = Reassembled(
+            partial.seq_auth, partial.akf, partial.aid, partial.szmic, upper, partial.iv_index
+        )
         return SegmentResult(message, block_ack, seg.seq_zero, True)
