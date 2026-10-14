@@ -1,6 +1,15 @@
 import pytest
 
-from mesh.pdu import NetworkKeys, decrypt_network_pdu, encrypt_network_pdu
+from mesh.pdu import (
+    MAX_PROXY_MESSAGE,
+    PDU_NETWORK,
+    PDU_PROXY_CONFIG,
+    NetworkKeys,
+    ProxyReassembler,
+    decrypt_network_pdu,
+    encrypt_network_pdu,
+    proxy_pdus,
+)
 
 SAMPLE_NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
 KEYS = NetworkKeys.from_net_key(SAMPLE_NET_KEY)
@@ -74,3 +83,58 @@ def test_decrypt_rejects_tamper_wrong_iv_short_and_nid():
     assert decrypt_network_pdu(KEYS, b"", IV) is None
     other = NetworkKeys.from_net_key(bytes(16))
     assert decrypt_network_pdu(other, MSG1_PDU, IV) is None
+
+
+def test_proxy_pdus_complete_when_it_fits():
+    assert proxy_pdus(PDU_NETWORK, b"\x11" * 19, 20) == [b"\x00" + b"\x11" * 19]
+
+
+def test_proxy_pdus_split_first_continue_last():
+    payload = bytes(range(50))
+    parts = proxy_pdus(PDU_PROXY_CONFIG, payload, 20)
+    assert [p[0] for p in parts] == [0x42, 0x82, 0xC2]
+    assert [len(p) for p in parts] == [20, 20, 13]
+    assert b"".join(p[1:] for p in parts) == payload
+
+
+def test_proxy_pdus_rejects_tiny_mtu():
+    with pytest.raises(ValueError):
+        proxy_pdus(PDU_NETWORK, b"x", 1)
+
+
+def test_reassembler_round_trip():
+    payload = bytes(range(50))
+    rx = ProxyReassembler()
+    results = [rx.feed(p) for p in proxy_pdus(PDU_NETWORK, payload, 20)]
+    assert results[:-1] == [None, None]
+    assert results[-1] == (PDU_NETWORK, payload)
+
+
+def test_reassembler_complete_passes_through():
+    assert ProxyReassembler().feed(b"\x01\xaa\xbb") == (1, b"\xaa\xbb")
+
+
+def test_reassembler_drops_junk():
+    rx = ProxyReassembler()
+    assert rx.feed(b"") is None
+    assert rx.feed(b"\x80\x01\x02") is None  # continuation with no first part
+    assert rx.feed(b"\xc0\x01\x02") is None  # last with no first part
+    assert rx.feed(b"\x40\x01") is None
+    assert rx.feed(b"\x82\x02") is None  # type changes mid-message -> reset
+    assert rx.feed(b"\xc0\x03") is None  # the old partial is gone
+    assert rx.feed(b"\x00\x09") == (0, b"\x09")
+
+
+def test_reassembler_complete_discards_partial():
+    rx = ProxyReassembler()
+    rx.feed(b"\x40\x01")
+    assert rx.feed(b"\x00\x09") == (0, b"\x09")
+    assert rx.feed(b"\xc0\x02") is None
+
+
+def test_reassembler_caps_message_size():
+    rx = ProxyReassembler()
+    assert rx.feed(b"\x40" + bytes(300)) is None
+    assert rx.feed(b"\x80" + bytes(300)) is None  # over MAX_PROXY_MESSAGE -> dropped
+    assert rx.feed(b"\xc0\x01") is None
+    assert MAX_PROXY_MESSAGE == 512

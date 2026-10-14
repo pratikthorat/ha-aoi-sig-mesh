@@ -119,3 +119,59 @@ def decrypt_network_pdu(
     except MeshAuthError:
         return None
     return NetworkPDU(ivi, nid, ctl, ttl, seq, src, int.from_bytes(plain[:2], "big"), plain[2:])
+
+
+def proxy_pdus(pdu_type: int, payload: bytes, max_write: int) -> list[bytes]:
+    """Split a proxy message into GATT writes of at most ``max_write`` bytes."""
+    if max_write < 2:
+        raise ValueError("max_write must be at least 2")
+    chunk = max_write - 1
+    if len(payload) <= chunk:
+        return [bytes([(SAR_COMPLETE << 6) | pdu_type]) + payload]
+    pieces = [payload[i : i + chunk] for i in range(0, len(payload), chunk)]
+    parts = []
+    for index, piece in enumerate(pieces):
+        if index == 0:
+            sar = SAR_FIRST
+        elif index == len(pieces) - 1:
+            sar = SAR_LAST
+        else:
+            sar = SAR_CONTINUE
+        parts.append(bytes([(sar << 6) | pdu_type]) + piece)
+    return parts
+
+
+class ProxyReassembler:
+    """Rebuild proxy messages from GATT notifications. Never raises on junk."""
+
+    def __init__(self) -> None:
+        self._type: int | None = None
+        self._buffer = bytearray()
+
+    def _reset(self) -> None:
+        self._type = None
+        self._buffer = bytearray()
+
+    def feed(self, data: bytes) -> tuple[int, bytes] | None:
+        if not data:
+            return None
+        sar, pdu_type, body = data[0] >> 6, data[0] & 0x3F, data[1:]
+        if sar == SAR_COMPLETE:
+            self._reset()
+            return pdu_type, bytes(body)
+        if sar == SAR_FIRST:
+            self._type = pdu_type
+            self._buffer = bytearray(body)
+            return None
+        if self._type is None or pdu_type != self._type:
+            self._reset()
+            return None
+        self._buffer += body
+        if len(self._buffer) > MAX_PROXY_MESSAGE:
+            self._reset()
+            return None
+        if sar == SAR_LAST:
+            message = bytes(self._buffer)
+            self._reset()
+            return pdu_type, message
+        return None
