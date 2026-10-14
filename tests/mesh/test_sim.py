@@ -1,6 +1,7 @@
 import asyncio
 
 from mesh.config import (
+    STATUS_SUCCESS,
     config_appkey_add,
     config_composition_get,
     config_model_app_bind,
@@ -9,6 +10,7 @@ from mesh.config import (
     parse_composition_status,
 )
 from mesh.models import (
+    OP_ONOFF_SET,
     ctl_set,
     ctl_temperature_range_get,
     ctl_temperature_set,
@@ -36,14 +38,22 @@ from mesh.pdu import (
     proxy_pdus,
     set_filter_type,
 )
-from mesh.transport import decrypt_upper, encrypt_upper, parse_lower_access, unsegmented_access
-from tests.sim.mesh_sim import APP_KEY, CLIENT, SimMesh, SimNode, run
+from mesh.transport import (
+    SegmentReassembler,
+    decrypt_upper,
+    encrypt_upper,
+    parse_lower_access,
+    unsegmented_access,
+)
+from tests.sim.mesh_sim import APP_KEY, CLIENT, TUYA_VENDOR_MODEL, SimMesh, SimNode, run
 
 DEV_KEY = bytes.fromhex("9d6dd0e96eb25dc19a40ed9914f8f03f")
 
 
 def light(**kwargs):
-    return SimNode(unicast=0x00B0, dev_key=DEV_KEY, **kwargs)
+    node = SimNode(unicast=0x00B0, dev_key=DEV_KEY, **kwargs)
+    node.bind_all()
+    return node
 
 
 def test_spec_light_behaviour():
@@ -95,6 +105,7 @@ def test_unacknowledged_sets_get_no_reply():
 
 def test_plug_only_answers_onoff():
     plug = SimNode(unicast=0x0010, dev_key=DEV_KEY, kind="onoff")
+    plug.bind_all()
     assert plug.element_count == 1
     assert plug.handle(0x0010, lightness_get(), dev_key=False) == []
     assert plug.handle(0x0010, onoff_get(), dev_key=False) == [(0x0010, bytes.fromhex("820400"))]
@@ -132,9 +143,10 @@ def messages(parts):
     return [m for m in map(rx.feed, parts) if m is not None]
 
 
-def client_network_pdu(sim, dst, access, seq):
+def client_network_pdu(sim, dst, access, seq, *, dev_key=None):
+    akf, key, aid = (0, dev_key, 0) if dev_key else (1, APP_KEY, sim.aid)
     upper = encrypt_upper(
-        APP_KEY, akf=1, szmic=0, seq=seq, src=CLIENT, dst=dst, iv_index=0, access_payload=access
+        key, akf=akf, szmic=0, seq=seq, src=CLIENT, dst=dst, iv_index=0, access_payload=access
     )
     return encrypt_network_pdu(
         sim.keys,
@@ -143,9 +155,40 @@ def client_network_pdu(sim, dst, access, seq):
         seq=seq,
         src=CLIENT,
         dst=dst,
-        transport_pdu=unsegmented_access(upper, akf=1, aid=sim.aid),
+        transport_pdu=unsegmented_access(upper, akf=akf, aid=aid),
         iv_index=0,
     )
+
+
+async def write_pdus(transport, *pdus, pdu_type=PDU_NETWORK):
+    """Write whole proxy PDUs to the sim, then let its notifications arrive."""
+    for pdu in pdus:
+        for part in proxy_pdus(pdu_type, pdu, transport.max_write):
+            await transport.write(part)
+    await asyncio.sleep(0)
+
+
+def access_replies(sim, received, *, dev_key=None, iv_index=0):
+    """Decrypt the unsegmented access messages the sim sent to the client."""
+    replies = []
+    for pdu_type, payload in messages(received):
+        net = decrypt_network_pdu(sim.keys, payload, iv_index)
+        if pdu_type != PDU_NETWORK or net.ctl:
+            continue
+        lower = parse_lower_access(net.transport_pdu)
+        replies.append(
+            decrypt_upper(
+                APP_KEY if lower.akf else dev_key,
+                akf=lower.akf,
+                szmic=0,
+                seq=net.seq,
+                src=net.src,
+                dst=net.dst,
+                iv_index=iv_index,
+                upper=lower.data,
+            )
+        )
+    return replies
 
 
 def test_connect_sends_a_beacon():
@@ -209,3 +252,147 @@ def test_proxy_filter_messages():
     ]
     assert statuses == [FilterStatus(FILTER_ACCEPT, 0), FilterStatus(FILTER_ACCEPT, 1)]
     assert sim.filter_addresses == {CLIENT}
+
+
+def test_replayed_pdu_is_dropped():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        pdu = client_network_pdu(sim, node.unicast, onoff_get(), seq=1)
+        await write_pdus(transport, pdu, pdu)  # the same bytes twice
+        return access_replies(sim, received)
+
+    assert run(scenario()) == [bytes.fromhex("820400")]
+    assert len(sim.from_client) == 2  # both logged, only the first delivered
+
+
+def test_lower_seq_from_same_src_is_dropped():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        await write_pdus(
+            transport,
+            client_network_pdu(sim, node.unicast, onoff_set(True, 1), seq=5),
+            client_network_pdu(sim, node.unicast, onoff_set(False, 2), seq=4),
+        )
+        return access_replies(sim, received)
+
+    assert run(scenario()) == [bytes.fromhex("820401")]
+    assert node.on is True
+
+
+def test_accept_replays_opts_out():
+    sim = SimMesh()
+    sim.accept_replays = True
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        pdu = client_network_pdu(sim, node.unicast, onoff_get(), seq=1)
+        await write_pdus(transport, pdu, pdu)
+        return access_replies(sim, received)
+
+    assert run(scenario()) == [bytes.fromhex("820400")] * 2
+
+
+def test_forget_replay_accepts_a_restarted_seq():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        await write_pdus(transport, client_network_pdu(sim, node.unicast, onoff_get(), seq=9))
+        sim.forget_replay(CLIENT, 1)
+        await write_pdus(transport, client_network_pdu(sim, node.unicast, onoff_get(), seq=0))
+        return access_replies(sim, received)
+
+    assert run(scenario()) == [bytes.fromhex("820400")] * 2
+
+
+def test_unbound_model_is_ignored():
+    sim = SimMesh()
+    node = sim.add_node("ctl", configured=False)
+    assert node.bindings == set()
+    node.handle(node.unicast, config_appkey_add(0, 0, APP_KEY), dev_key=True)
+    assert node.has_app_key
+    assert node.handle(node.unicast, onoff_set(True, 1), dev_key=False) == []
+    assert node.on is False
+    assert node.received[-1] == (node.unicast, OP_ONOFF_SET, onoff_set(True, 1)[2:])
+    node.handle(node.unicast, config_model_app_bind(node.unicast, 0, 0x1000), dev_key=True)
+    assert node.handle(node.unicast, onoff_set(True, 2), dev_key=False) == [
+        (node.unicast, bytes.fromhex("820401"))
+    ]
+    assert node.on is True
+
+
+def test_configured_node_is_bound_to_every_app_key_model():
+    node = SimMesh().add_node("ctl", configured=True)
+    assert node.bindings == {
+        (0x00B0, 0x1000),
+        (0x00B0, 0x1300),
+        (0x00B0, 0x1303),
+        (0x00B0, TUYA_VENDOR_MODEL),
+        (0x00B1, 0x1306),
+    }
+
+
+def test_bind_to_missing_model_returns_invalid_model():
+    node = SimNode(unicast=0x00B0, dev_key=DEV_KEY)
+    [(_, reply)] = node.handle(0x00B0, config_model_app_bind(0x00B0, 0, 0x1306), dev_key=True)
+    assert reply == bytes.fromhex("803e02b00000000613")  # 0x1306 is on element 1
+    [(_, reply)] = node.handle(0x00B0, config_model_app_bind(0x00B2, 0, 0x1000), dev_key=True)
+    assert reply == bytes.fromhex("803e01b20000000010")  # no element 2
+    publication = config_model_publication_set(0x00B1, 0x0001, 0, 0x1000)
+    [(_, reply)] = node.handle(0x00B0, publication, dev_key=True)
+    assert reply == bytes.fromhex("801902") + publication[1:]
+    publication = config_model_publication_set(0x00AF, 0x0001, 0, 0x1000)
+    [(_, reply)] = node.handle(0x00B0, publication, dev_key=True)
+    assert reply == bytes.fromhex("801901") + publication[1:]
+    assert (node.bindings, node.publications) == (set(), {})
+    [(_, reply)] = node.handle(
+        0x00B0, config_model_app_bind(0x00B0, 0, TUYA_VENDOR_MODEL), dev_key=True
+    )
+    assert reply[2] == STATUS_SUCCESS
+    assert node.bindings == {(0x00B0, TUYA_VENDOR_MODEL)}
+
+
+def test_config_to_secondary_element_is_ignored():
+    node = light(has_app_key=False)
+    assert node.handle(0x00B1, config_composition_get(), dev_key=True) == []
+    assert node.handle(0x00B1, config_appkey_add(0, 0, APP_KEY), dev_key=True) == []
+    assert node.handle(0x00B1, config_node_reset(), dev_key=True) == []
+    assert (node.has_app_key, node.reset) == (False, False)
+
+
+def test_reset_node_forgets_segments():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    forgotten = []
+
+    class SpyReassembler(SegmentReassembler):
+        def forget(self, first, count):
+            forgotten.append((first, count))
+            super().forget(first, count)
+
+    sim._segments = SpyReassembler()
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        reset = client_network_pdu(
+            sim, node.unicast, config_node_reset(), seq=1, dev_key=node.dev_key
+        )
+        await write_pdus(transport, reset)
+        return access_replies(sim, received, dev_key=node.dev_key)
+
+    assert run(scenario()) == [bytes.fromhex("804a")]
+    assert node.reset
+    assert forgotten == [(0x00B0, 2)]

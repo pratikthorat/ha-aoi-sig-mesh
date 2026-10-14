@@ -92,11 +92,28 @@ CLIENT = 0x0001
 SIM_PROXY = 0x7FF0
 TUYA_VENDOR_MODEL = (0x07D0 << 16) | 0x0004
 KINDS = ("ctl", "lightness", "onoff")
+STATUS_INVALID_ADDRESS = 0x01
+STATUS_INVALID_MODEL = 0x02
+DEV_KEY_MODELS = (0x0000, 0x0002)  # Config Server and Health Server: never bound to the AppKey
+TUYA_CID_LE = 0xD007  # the Tuya company ID as it appears at the end of a vendor opcode
+OPCODE_MODELS = {
+    **dict.fromkeys((OP_ONOFF_GET, OP_ONOFF_SET, OP_ONOFF_SET_UNACK), 0x1000),
+    **dict.fromkeys((OP_LIGHTNESS_GET, OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK), 0x1300),
+    **dict.fromkeys((OP_CTL_GET, OP_CTL_SET, OP_CTL_SET_UNACK, OP_CTL_TEMP_RANGE_GET), 0x1303),
+    **dict.fromkeys((OP_CTL_TEMP_GET, OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), 0x1306),
+}
 
 
 def run(coro: Coroutine[Any, Any, Any], timeout: float = 5.0) -> Any:
     """Run a test scenario on a fresh event loop, failing it if it hangs."""
     return asyncio.run(asyncio.wait_for(coro, timeout))
+
+
+def _target_model(opcode: int) -> int | None:
+    """The server model an app-key opcode is addressed to (None: not binding-checked)."""
+    if opcode >= 0xC00000 and opcode & 0xFFFF == TUYA_CID_LE:
+        return TUYA_VENDOR_MODEL
+    return OPCODE_MODELS.get(opcode)
 
 
 def _model_id(raw: bytes) -> int:
@@ -138,6 +155,13 @@ class SimNode:
     def present_lightness(self) -> int:
         return self.lightness if self.on else 0
 
+    def bind_all(self) -> None:
+        """Bind every app-key model in the composition, like a node imported already set up."""
+        for index, element in enumerate(self.composition().elements):
+            for model in element.sig_models + element.vendor_models:
+                if model not in DEV_KEY_MODELS:
+                    self.bindings.add((self.unicast + index, model))
+
     def composition(self) -> CompositionData:
         if self.kind == "ctl":
             elements = (
@@ -157,8 +181,23 @@ class SimNode:
         opcode, params = parse_opcode(access)
         self.received.append((dst, opcode, params))
         if dev_key:
+            if dst != self.unicast:  # the Config Server lives on the primary element only
+                return []
             return self._config(opcode, params)
+        model = _target_model(opcode)
+        if model is not None and (dst, model) not in self.bindings:
+            return []
         return self._model(dst - self.unicast, opcode, params)
+
+    def _model_status(self, element: int, model: int) -> int:
+        """Config status for a model reference: Success, Invalid Address or Invalid Model."""
+        index = element - self.unicast
+        if not 0 <= index < self.element_count:
+            return STATUS_INVALID_ADDRESS
+        found = self.composition().elements[index]
+        if model not in found.sig_models + found.vendor_models:
+            return STATUS_INVALID_MODEL
+        return STATUS_SUCCESS
 
     def _config(self, opcode: int, params: bytes) -> list[tuple[int, bytes]]:
         me = self.unicast
@@ -172,12 +211,18 @@ class SimNode:
             return [(me, encode_opcode(OP_APPKEY_STATUS) + ok + params[:3])]
         if opcode == OP_MODEL_APP_BIND and len(params) in (6, 8):
             element = struct.unpack_from("<H", params)[0]
-            self.bindings.add((element, _model_id(params[4:])))
-            return [(me, encode_opcode(OP_MODEL_APP_STATUS) + ok + params)]
+            model = _model_id(params[4:])
+            status = self._model_status(element, model)
+            if status == STATUS_SUCCESS:
+                self.bindings.add((element, model))
+            return [(me, encode_opcode(OP_MODEL_APP_STATUS) + bytes([status]) + params)]
         if opcode == OP_PUBLICATION_SET and len(params) in (11, 13):
             element, publish = struct.unpack_from("<HH", params)
-            self.publications[(element, _model_id(params[9:]))] = publish
-            return [(me, encode_opcode(OP_PUBLICATION_STATUS) + ok + params)]
+            model = _model_id(params[9:])
+            status = self._model_status(element, model)
+            if status == STATUS_SUCCESS:
+                self.publications[(element, model)] = publish
+            return [(me, encode_opcode(OP_PUBLICATION_STATUS) + bytes([status]) + params)]
         if opcode == OP_NODE_RESET:
             self.reset = True
             return [(me, encode_opcode(OP_NODE_RESET_STATUS))]
@@ -351,12 +396,14 @@ class SimMesh:
         self.silent = False
         self.drop_from_client = 0
         self.reject_segments = False
+        self.accept_replays = False  # opt out of replay protection
         self.from_client: list[NetworkPDU] = []
         self.acks_from_client: list[SegmentAck] = []
         self.last_network: bytes | None = None
         self._seq = itertools.count()
         self._proxy_rx = ProxyReassembler()
         self._segments = SegmentReassembler()
+        self._replay: dict[int, tuple[int, int]] = {}  # src -> last accepted (iv_index, seq)
 
     # nodes and links
 
@@ -384,6 +431,8 @@ class SimMesh:
             tuya_quirks=tuya_quirks,
             has_app_key=configured,
         )
+        if configured:
+            node.bind_all()
         self.nodes[unicast] = node
         return node
 
@@ -406,6 +455,12 @@ class SimMesh:
         if beacon:
             self.send_beacon()
         return self.transport
+
+    def forget_replay(self, first: int, count: int) -> None:
+        """Clear replay and segment state for srcs first..first+count-1 (re-provisioned)."""
+        for src in range(first, first + count):
+            self._replay.pop(src, None)
+        self._segments.forget(first, count)
 
     def reset_seq(self) -> None:
         """Nodes restart their seq at 0 when an IV Update completes."""
@@ -547,6 +602,10 @@ class SimMesh:
             self.drop_from_client -= 1
             return
         self.from_client.append(net)
+        last = self._replay.get(net.src)
+        if not self.accept_replays and last is not None and (iv, net.seq) <= last:
+            return  # replayed or older: Mesh Profile 3.8.8
+        self._replay[net.src] = (iv, net.seq)
         if self.filter_type == FILTER_ACCEPT:
             self.filter_addresses.add(net.src)
         if net.ctl:
@@ -593,10 +652,13 @@ class SimMesh:
         )
         if access is None:
             return
+        was_reset = node.reset
         try:
             replies = node.handle(net.dst, access, dev_key=not akf)
         except MalformedPDUError:
             return
+        if node.reset and not was_reset:
+            self._segments.forget(node.unicast, node.element_count)
         if self.silent:
             return
         for src, reply in replies:
