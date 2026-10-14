@@ -12,6 +12,7 @@ from .pdu import NetworkKeys, SecureBeacon
 
 SEQ_BLOCK = 64
 SEQ_MAX = 0xFFFFFF
+IV_INDEX_MAX = 0xFFFFFFFF
 
 
 class BeaconOutcome(enum.Enum):
@@ -52,6 +53,13 @@ class MeshNetwork:
         self._replay: dict[int, tuple[int, int]] = {
             int(src): (int(last[0]), int(last[1])) for src, last in state.get("replay", {}).items()
         }
+        if not 0 <= self._iv_index <= IV_INDEX_MAX:
+            raise ValueError(f"stored IV index {self._iv_index} is out of range")
+        if not 0 <= self._seq <= SEQ_MAX + 1:
+            raise ValueError(f"stored seq {self._seq} is out of range")
+        for src, (iv, seq) in self._replay.items():
+            if not (0 <= iv <= IV_INDEX_MAX and 0 <= seq <= SEQ_MAX):
+                raise ValueError(f"stored replay entry for 0x{src:04X} is out of range")
         self._on_persist = on_persist
 
     def __repr__(self) -> str:
@@ -74,6 +82,8 @@ class MeshNetwork:
 
     def next_seq(self, count: int = 1) -> int:
         """Hand out ``count`` consecutive seqs; the reserved ceiling is persisted first."""
+        if count < 1:
+            raise ValueError(f"count must be at least 1, got {count}")
         first = self._seq
         end = first + count
         if end > SEQ_MAX + 1:

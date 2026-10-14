@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from mesh.errors import MeshError
@@ -240,3 +242,58 @@ def test_beacon_jump_too_far_is_not_applied():
     assert net.apply_beacon(beacon(3)) is BeaconOutcome.TOO_FAR
     assert (net.iv_index, net.iv_update) == (1, False)
     assert saved == []
+
+
+@pytest.mark.parametrize("count", [0, -1])
+def test_next_seq_rejects_non_positive_count(count):
+    net = make(state={"seq": 500})
+    with pytest.raises(ValueError):
+        net.next_seq(count)
+    assert net.next_seq() == 500
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"iv_index": -1},
+        {"iv_index": 0x1_0000_0000},
+        {"seq": -1},
+        {"seq": SEQ_MAX + 2},
+        {"replay": {"176": [-1, 0]}},
+        {"replay": {"176": [0x1_0000_0000, 0]}},
+        {"replay": {"176": [0, -1]}},
+        {"replay": {"176": [0, SEQ_MAX + 1]}},
+    ],
+)
+def test_constructor_rejects_invalid_state(state):
+    with pytest.raises(ValueError):
+        make(state=state)
+
+
+def test_state_survives_json_round_trip():
+    net = make(state={"iv_index": 3, "iv_update": True})
+    for _ in range(10):
+        net.next_seq()
+    net.accept_replay(0x00B0, 7, 2)
+    net.accept_replay(0x00C0, 9, 3)
+    state = net.persistent_state()
+    restored = make(state=json.loads(json.dumps(state)))
+    assert (restored.iv_index, restored.iv_update) == (3, True)
+    assert not restored.accept_replay(0x00B0, 7, 2)
+    assert restored.accept_replay(0x00B0, 8, 2)
+    assert not restored.accept_replay(0x00C0, 9, 3)
+    assert restored.next_seq() >= state["seq"]
+
+
+def test_restart_after_iv_reset_resumes_safely():
+    saved = []
+    net = make(state={"iv_index": 1, "iv_update": True, "seq": 500}, saved=saved)
+    assert net.apply_beacon(beacon(1)) is BeaconOutcome.UPDATED
+    assert saved[-1]["seq"] == 0
+    resaved = []
+    restarted = make(state=saved[-1], saved=resaved)
+    seq = restarted.next_seq()
+    assert seq >= 0
+    assert len(resaved) == 1  # a new ceiling was persisted before the seq was handed out
+    assert resaved[0]["seq"] > seq
+    assert (resaved[0]["iv_index"], resaved[0]["iv_update"]) == (1, False)
