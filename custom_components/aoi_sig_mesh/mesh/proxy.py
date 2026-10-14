@@ -10,19 +10,22 @@ from typing import Any, Protocol
 
 from .errors import LinkClosedError, MeshError, MeshTimeout
 from .models import parse_opcode
-from .network import MeshNetwork
+from .network import BeaconOutcome, MeshNetwork
 from .pdu import (
     FILTER_ACCEPT,
+    PDU_BEACON,
     PDU_NETWORK,
     PDU_PROXY_CONFIG,
     FilterStatus,
     ProxyReassembler,
+    SecureBeacon,
     add_addresses,
     decrypt_network_pdu,
     decrypt_proxy_config,
     encrypt_network_pdu,
     encrypt_proxy_config,
     parse_filter_status,
+    parse_secure_beacon,
     proxy_pdus,
     set_filter_type,
 )
@@ -106,6 +109,7 @@ class ProxyLink:
         *,
         dev_key_for: Callable[[int], bytes | None],
         on_message: Callable[[AccessMessage], None] | None = None,
+        on_beacon: Callable[[SecureBeacon, BeaconOutcome], None] | None = None,
         on_close: Callable[[], None] | None = None,
         ttl: int | None = None,
     ) -> None:
@@ -113,6 +117,7 @@ class ProxyLink:
         self._transport = transport
         self._dev_key_for = dev_key_for
         self._on_message = on_message
+        self._on_beacon = on_beacon
         self._on_close = on_close
         self._ttl = DEFAULT_TTL if ttl is None else ttl
         self._proxy_rx = ProxyReassembler()
@@ -356,6 +361,8 @@ class ProxyLink:
             pdu_type, payload = message
             if pdu_type == PDU_NETWORK:
                 self._on_network(payload)
+            elif pdu_type == PDU_BEACON:
+                self._on_beacon_pdu(payload)
             elif pdu_type == PDU_PROXY_CONFIG:
                 self._on_proxy_config(payload)
         except Exception:
@@ -419,6 +426,29 @@ class ProxyLink:
             outgoing.rejected = True  # the receiver cannot take the message
         outgoing.acked |= ack.block_ack
         outgoing.event.set()
+
+    def _on_beacon_pdu(self, payload: bytes) -> None:
+        beacon = parse_secure_beacon(self._network.keys, payload)
+        if beacon is None:
+            return  # another network, or not a Secure Network Beacon
+        try:
+            outcome = self._network.apply_beacon(beacon)
+        except Exception:
+            # on_persist failed: the new IV state is in memory but not saved. Never let it
+            # escape the notify callback; the next seq reservation persists it again.
+            _LOGGER.exception("Could not save the IV index from a beacon")
+            return
+        if outcome is BeaconOutcome.TOO_FAR:
+            _LOGGER.warning(
+                "Ignoring a beacon with IV index %d: we are at %d and accept one step at a time",
+                beacon.iv_index,
+                self._network.iv_index,
+            )
+        if self._on_beacon is not None:
+            try:
+                self._on_beacon(beacon, outcome)
+            except Exception:
+                _LOGGER.exception("on_beacon callback failed")
 
     def _on_upper(
         self,

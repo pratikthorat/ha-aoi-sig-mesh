@@ -13,7 +13,7 @@ from mesh.models import (
     onoff_get,
     onoff_set,
 )
-from mesh.network import MeshNetwork
+from mesh.network import BeaconOutcome, MeshNetwork
 from mesh.pdu import FILTER_ACCEPT, PDU_BEACON, PDU_NETWORK, PDU_PROXY_CONFIG
 from mesh.proxy import AccessMessage, ProxyLink
 from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, LoopbackTransport, SimMesh, run
@@ -295,3 +295,61 @@ def test_failed_write_closes_the_link():
 
     assert run(scenario()) is False
     assert closed == [True]
+
+
+def test_iv_update_beacons_are_applied_and_the_link_keeps_working():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    outcomes = []
+
+    async def scenario():
+        network, _, link = make_link(
+            sim, on_beacon=lambda beacon, outcome: outcomes.append(outcome)
+        )
+        await link.start()
+        sim.iv_index, sim.iv_update = 1, True
+        sim.send_beacon()
+        await asyncio.sleep(0.01)
+        during = (network.iv_index, network.iv_update, network.tx_iv_index)
+        first = await link.request(node.unicast, onoff_set(True, 1), OP_ONOFF_STATUS)
+        sim.iv_update = False
+        sim.reset_seq()  # nodes restart their seq when the update completes
+        sim.send_beacon()
+        await asyncio.sleep(0.01)
+        after = (network.iv_index, network.iv_update, network.tx_iv_index)
+        second = await link.request(node.unicast, onoff_set(False, 2), OP_ONOFF_STATUS)
+        return during, after, first.params, second.params
+
+    during, after, first, second = run(scenario())
+    assert during == (1, True, 0)  # still sending with the old IV index
+    assert after == (1, False, 1)
+    assert (first, second) == (b"\x01", b"\x00")
+    assert outcomes == [BeaconOutcome.UPDATED, BeaconOutcome.UPDATED]
+
+
+def test_beacon_from_another_network_is_ignored():
+    sim = SimMesh()
+    outcomes = []
+
+    async def scenario():
+        network, _, _ = make_link(sim, on_beacon=lambda beacon, outcome: outcomes.append(outcome))
+        sim.send_beacon(iv_index=1, net_key=bytes(range(16)))
+        await asyncio.sleep(0.01)
+        return network.iv_index
+
+    assert run(scenario()) == 0
+    assert outcomes == []
+
+
+def test_beacon_too_far_ahead_is_reported_not_applied():
+    sim = SimMesh()
+    outcomes = []
+
+    async def scenario():
+        network, _, _ = make_link(sim, on_beacon=lambda beacon, outcome: outcomes.append(outcome))
+        sim.send_beacon(iv_index=5)
+        await asyncio.sleep(0.01)
+        return network.iv_index
+
+    assert run(scenario()) == 0
+    assert outcomes == [BeaconOutcome.TOO_FAR]
