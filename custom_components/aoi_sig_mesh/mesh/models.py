@@ -64,3 +64,27 @@ def parse_opcode(access: bytes) -> tuple[int, bytes]:
     if len(access) < size:
         raise MalformedPDUError("truncated opcode")
     return int.from_bytes(access[:size], "big"), bytes(access[size:])
+
+
+_STEP_MS = (100, 1_000, 10_000, 600_000)
+_MAX_STEPS = 0x3E
+_UNKNOWN_STEPS = 0x3F
+
+
+def encode_transition(ms: int) -> int:
+    """Encode a duration as the Generic Default Transition Time byte (rounding up)."""
+    if ms <= 0:
+        return 0
+    for resolution, step_ms in enumerate(_STEP_MS):
+        steps = -(-ms // step_ms)
+        if steps <= _MAX_STEPS:
+            return (resolution << 6) | steps
+    return (3 << 6) | _MAX_STEPS
+
+
+def decode_transition(value: int) -> int | None:
+    """Decode a transition-time byte to milliseconds; None when the value is 'unknown'."""
+    steps = value & 0x3F
+    if steps == _UNKNOWN_STEPS:
+        return None
+    return steps * _STEP_MS[value >> 6]
