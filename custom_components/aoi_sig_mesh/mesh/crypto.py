@@ -1,9 +1,11 @@
 """Mesh Profile cryptographic primitives (spec section 3.8.2)."""
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 from cryptography.hazmat.primitives.cmac import CMAC
 
-from .errors import MeshCryptoError
+from .errors import MeshAuthError, MeshCryptoError
 
 KEY_LEN = 16
 
@@ -70,3 +72,33 @@ def k4(n: bytes) -> int:
 def beacon_key(net_key: bytes) -> bytes:
     """BeaconKey used to authenticate Secure Network Beacons."""
     return k1(net_key, s1(b"nkbk"), b"id128\x01")
+
+
+NONCE_LEN = 13
+
+
+def _check_ccm(key: bytes, nonce: bytes, mic_len: int) -> None:
+    _check_key(key)
+    if len(nonce) != NONCE_LEN:
+        raise MeshCryptoError(f"nonce must be {NONCE_LEN} bytes, got {len(nonce)}")
+    if mic_len not in (4, 8):
+        raise MeshCryptoError(f"MIC length must be 4 or 8, got {mic_len}")
+
+
+def ccm_encrypt(
+    key: bytes, nonce: bytes, plaintext: bytes, mic_len: int, aad: bytes = b""
+) -> bytes:
+    """AES-CCM encrypt; returns ciphertext followed by the MIC."""
+    _check_ccm(key, nonce, mic_len)
+    return AESCCM(key, tag_length=mic_len).encrypt(nonce, plaintext, aad or None)
+
+
+def ccm_decrypt(key: bytes, nonce: bytes, data: bytes, mic_len: int, aad: bytes = b"") -> bytes:
+    """AES-CCM decrypt ciphertext+MIC; raises MeshAuthError if the MIC fails."""
+    _check_ccm(key, nonce, mic_len)
+    if len(data) <= mic_len:
+        raise MeshAuthError("data shorter than its MIC")
+    try:
+        return AESCCM(key, tag_length=mic_len).decrypt(nonce, data, aad or None)
+    except (InvalidTag, ValueError) as err:
+        raise MeshAuthError("MIC check failed") from err

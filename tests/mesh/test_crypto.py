@@ -1,7 +1,18 @@
 import pytest
 
-from mesh.crypto import aes_cmac, aes_ecb, beacon_key, k1, k2, k3, k4, s1
-from mesh.errors import MeshCryptoError
+from mesh.crypto import (
+    aes_cmac,
+    aes_ecb,
+    beacon_key,
+    ccm_decrypt,
+    ccm_encrypt,
+    k1,
+    k2,
+    k3,
+    k4,
+    s1,
+)
+from mesh.errors import MeshAuthError, MeshCryptoError
 
 RFC4493_KEY = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
 RFC4493_MSG = bytes.fromhex(
@@ -85,3 +96,38 @@ def test_sample_net_key_derivations():
 
 def test_sample_app_key_aid():
     assert k4(SAMPLE_APP_KEY) == 0x26
+
+
+NONCE = bytes(range(13))
+
+
+@pytest.mark.parametrize("mic_len", [4, 8])
+def test_ccm_round_trip(mic_len):
+    data = ccm_encrypt(SAMPLE_APP_KEY, NONCE, b"hello mesh", mic_len)
+    assert len(data) == len(b"hello mesh") + mic_len
+    assert ccm_decrypt(SAMPLE_APP_KEY, NONCE, data, mic_len) == b"hello mesh"
+
+
+def test_ccm_tamper_raises_auth_error():
+    data = bytearray(ccm_encrypt(SAMPLE_APP_KEY, NONCE, b"hello mesh", 4))
+    data[0] ^= 0x01
+    with pytest.raises(MeshAuthError):
+        ccm_decrypt(SAMPLE_APP_KEY, NONCE, bytes(data), 4)
+
+
+def test_ccm_wrong_key_raises_auth_error():
+    data = ccm_encrypt(SAMPLE_APP_KEY, NONCE, b"hello mesh", 4)
+    with pytest.raises(MeshAuthError):
+        ccm_decrypt(SAMPLE_NET_KEY, NONCE, data, 4)
+
+
+def test_ccm_too_short_raises_auth_error():
+    with pytest.raises(MeshAuthError):
+        ccm_decrypt(SAMPLE_APP_KEY, NONCE, b"\x01\x02\x03", 4)
+
+
+def test_ccm_rejects_bad_nonce_and_mic_len():
+    with pytest.raises(MeshCryptoError):
+        ccm_encrypt(SAMPLE_APP_KEY, bytes(12), b"x", 4)
+    with pytest.raises(MeshCryptoError):
+        ccm_encrypt(SAMPLE_APP_KEY, NONCE, b"x", 6)
