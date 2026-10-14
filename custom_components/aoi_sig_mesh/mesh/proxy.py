@@ -89,12 +89,14 @@ class ProxyLink:
         *,
         dev_key_for: Callable[[int], bytes | None],
         on_message: Callable[[AccessMessage], None] | None = None,
+        on_close: Callable[[], None] | None = None,
         ttl: int | None = None,
     ) -> None:
         self._network = network
         self._transport = transport
         self._dev_key_for = dev_key_for
         self._on_message = on_message
+        self._on_close = on_close
         self._ttl = DEFAULT_TTL if ttl is None else ttl
         self._proxy_rx = ProxyReassembler()
         self._segments = SegmentReassembler()
@@ -106,6 +108,7 @@ class ProxyLink:
         self._closed = False
         self.filter_ok = False
         transport.set_notify_callback(self._on_notify)
+        transport.set_disconnect_callback(self._on_disconnect)
 
     @property
     def is_connected(self) -> bool:
@@ -193,6 +196,11 @@ class ProxyLink:
             elif not future.cancelled():
                 future.exception()  # mark a link-closed error as retrieved
 
+    async def close(self) -> None:
+        """Close the link on purpose. ``on_close`` is not called."""
+        self._handle_closed(notify=False)
+        await self._transport.close()
+
     def forget_node(self, first: int, count: int) -> None:
         """Forget a reset and re-provisioned node's elements, so its restarted SEQ is accepted."""
         self._network.forget_replay(first, count)
@@ -249,7 +257,13 @@ class ProxyLink:
             for part in proxy_pdus(pdu_type, payload, self._transport.max_write):
                 if not self.is_connected:
                     raise LinkClosedError("proxy link is closed")
-                await self._transport.write(part)
+                try:
+                    await self._transport.write(part)
+                except LinkClosedError:
+                    raise
+                except Exception as err:  # bleak and the HA bluetooth stack raise their own types
+                    self._handle_closed(notify=True)
+                    raise LinkClosedError(f"proxy write failed: {err}") from err
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
         """Run a send from a notification callback, keeping a reference until it is done."""
@@ -363,3 +377,24 @@ class ProxyLink:
                 self._on_message(message)
             except Exception:
                 _LOGGER.exception("on_message callback failed for %s", message)
+
+    def _on_disconnect(self) -> None:
+        self._handle_closed(notify=True)
+
+    def _handle_closed(self, *, notify: bool) -> None:
+        """Fail everything that waits on this link. Runs once; later calls do nothing."""
+        if self._closed:
+            return
+        self._closed = True
+        for waiters in self._waiters.values():
+            for future in waiters:
+                if not future.done():
+                    future.set_exception(LinkClosedError("proxy link closed"))
+        self._filter_event.set()
+        for task in self._tasks:
+            task.cancel()
+        if notify and self._on_close is not None:
+            try:
+                self._on_close()
+            except Exception:
+                _LOGGER.exception("on_close callback failed")

@@ -5,7 +5,7 @@ import pytest
 
 from mesh import proxy
 from mesh.config import OP_COMPOSITION_STATUS, config_composition_get, parse_composition_status
-from mesh.errors import MeshTimeout
+from mesh.errors import LinkClosedError, MeshTimeout
 from mesh.models import (
     OP_CTL_TEMP_STATUS,
     OP_ONOFF_STATUS,
@@ -16,7 +16,7 @@ from mesh.models import (
 from mesh.network import MeshNetwork
 from mesh.pdu import FILTER_ACCEPT, PDU_BEACON, PDU_NETWORK, PDU_PROXY_CONFIG
 from mesh.proxy import AccessMessage, ProxyLink
-from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, SimMesh, run
+from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, LoopbackTransport, SimMesh, run
 
 
 def make_link(sim, transport=None, **kwargs):
@@ -236,3 +236,62 @@ def test_forget_node_lets_a_reset_node_start_again_from_seq_0():
 
     reply = run(scenario())
     assert parse_composition_status(reply.params) == node.composition()
+
+
+class BrokenTransport(LoopbackTransport):
+    async def write(self, data):
+        raise OSError("GATT write failed")
+
+
+def test_link_drop_fails_pending_request_and_calls_on_close_once():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    sim.silent = True
+    closed = []
+
+    async def scenario():
+        _, transport, link = make_link(sim, on_close=lambda: closed.append(True))
+        pending = asyncio.ensure_future(link.request(node.unicast, onoff_get(), OP_ONOFF_STATUS))
+        await asyncio.sleep(0.01)
+        transport.drop()
+        with pytest.raises(LinkClosedError):
+            await asyncio.wait_for(pending, 0.5)  # promptly, not after REQUEST_TIMEOUT
+        with pytest.raises(LinkClosedError):
+            await link.send(node.unicast, onoff_get())
+        await link.close()  # closing a dropped link is harmless
+        return link.is_connected
+
+    assert run(scenario()) is False
+    assert closed == [True]
+
+
+def test_close_does_not_call_on_close():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    closed = []
+
+    async def scenario():
+        _, transport, link = make_link(sim, on_close=lambda: closed.append(True))
+        await link.close()
+        await asyncio.sleep(0.01)  # the transport's disconnect callback runs here
+        with pytest.raises(LinkClosedError):
+            await link.send(node.unicast, onoff_get())
+        return transport.is_connected
+
+    assert run(scenario()) is False
+    assert closed == []
+
+
+def test_failed_write_closes_the_link():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    closed = []
+
+    async def scenario():
+        _, _, link = make_link(sim, BrokenTransport(sim), on_close=lambda: closed.append(True))
+        with pytest.raises(LinkClosedError, match="GATT write failed"):
+            await link.send(node.unicast, onoff_get())
+        return link.is_connected
+
+    assert run(scenario()) is False
+    assert closed == [True]
