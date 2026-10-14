@@ -128,19 +128,24 @@ class MeshNetwork:
         self._ceiling = 0
 
     def apply_beacon(self, beacon: SecureBeacon) -> BeaconOutcome:
-        """Apply a verified Secure Network Beacon (IV Update procedure)."""
+        """Apply a verified Secure Network Beacon (IV Update procedure).
+
+        Invariant: the transmit IV index never decreases, and seq resets only when it
+        increases, so an (IV index, seq) pair is never used twice.
+        """
         if beacon.iv_index > self._iv_index + 1:
             return BeaconOutcome.TOO_FAR
-        if beacon.iv_index == self._iv_index + 1:
-            self._iv_index = beacon.iv_index
-            self._iv_update = beacon.iv_update
-            if not beacon.iv_update:
-                self._reset_seq()
-        elif beacon.iv_index == self._iv_index and beacon.iv_update != self._iv_update:
-            self._iv_update = beacon.iv_update
-            if not beacon.iv_update:
-                self._reset_seq()
-        else:
+        if beacon.iv_index < self._iv_index:
             return BeaconOutcome.UNCHANGED
+        if beacon.iv_index == self._iv_index and not (self._iv_update and not beacon.iv_update):
+            # Only In Progress -> Normal is allowed at the same IV index. Normal(N) ->
+            # In Progress(N) would move the transmit IV index back to N-1.
+            return BeaconOutcome.UNCHANGED
+        old_tx = self.tx_iv_index
+        self._iv_index = beacon.iv_index
+        self._iv_update = beacon.iv_update
+        new_tx = self.tx_iv_index
+        if new_tx > old_tx:  # a transmit IV index we have never used starts from seq 0
+            self._reset_seq()
         self._persist()
         return BeaconOutcome.UPDATED

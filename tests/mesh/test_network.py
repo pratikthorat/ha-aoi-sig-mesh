@@ -184,11 +184,45 @@ def test_beacon_one_step_ahead_in_normal_state_resets_seq():
     assert net.next_seq() == 0
 
 
-def test_beacon_same_iv_with_update_flag_enters_update():
-    net = make(state={"iv_index": 1, "seq": 500})
-    assert net.apply_beacon(beacon(1, iv_update=True)) is BeaconOutcome.UPDATED
-    assert (net.iv_update, net.tx_iv_index) == (True, 0)
+def test_beacon_same_iv_with_update_flag_is_ignored():
+    saved = []
+    net = make(state={"iv_index": 1, "seq": 500}, saved=saved)
+    assert net.apply_beacon(beacon(1, iv_update=True)) is BeaconOutcome.UNCHANGED
+    assert (net.iv_index, net.iv_update, net.tx_iv_index) == (1, False, 1)
+    assert saved == []
     assert net.next_seq() == 500
+
+
+def test_flapping_beacons_never_reuse_a_seq():
+    net = make(state={"iv_index": 1, "iv_update": True, "seq": 500})
+    assert net.apply_beacon(beacon(1)) is BeaconOutcome.UPDATED
+    assert [net.next_seq() for _ in range(10)] == list(range(10))
+    assert net.apply_beacon(beacon(1, iv_update=True)) is BeaconOutcome.UNCHANGED
+    assert net.apply_beacon(beacon(1)) is BeaconOutcome.UNCHANGED
+    assert net.next_seq() == 10
+    assert net.tx_iv_index == 1
+
+
+def test_beacon_at_iv_zero_with_update_flag_is_ignored():
+    net = make()
+    assert net.next_seq() == 0
+    assert net.apply_beacon(beacon(0, iv_update=True)) is BeaconOutcome.UNCHANGED
+    assert (net.iv_index, net.iv_update) == (0, False)
+    assert net.next_seq() == 1
+
+
+def test_ending_update_at_iv_zero_keeps_seq():
+    net = make(state={"iv_index": 0, "iv_update": True, "seq": 500})
+    assert net.apply_beacon(beacon(0)) is BeaconOutcome.UPDATED
+    assert (net.iv_index, net.iv_update) == (0, False)
+    assert net.next_seq() == 500  # the transmit IV index stayed 0
+
+
+def test_update_to_next_iv_while_in_progress_resets_seq():
+    net = make(state={"iv_index": 1, "iv_update": True, "seq": 500})
+    assert net.apply_beacon(beacon(2, iv_update=True)) is BeaconOutcome.UPDATED
+    assert (net.iv_index, net.iv_update, net.tx_iv_index) == (2, True, 1)
+    assert net.next_seq() == 0  # IV index 1 was never used for sending
 
 
 def test_beacon_with_nothing_new_is_unchanged():
