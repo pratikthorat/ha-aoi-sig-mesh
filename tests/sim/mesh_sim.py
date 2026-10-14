@@ -56,6 +56,7 @@ from mesh.models import (
 )
 from mesh.pdu import (
     FILTER_ACCEPT,
+    FILTER_REJECT,
     PDU_BEACON,
     PDU_NETWORK,
     PDU_PROXY_CONFIG,
@@ -92,6 +93,13 @@ CLIENT = 0x0001
 SIM_PROXY = 0x7FF0
 TUYA_VENDOR_MODEL = (0x07D0 << 16) | 0x0004
 KINDS = ("ctl", "lightness", "onoff")
+PROXY_OP_REMOVE_ADDRESSES = 0x02
+SET_LENGTHS = {  # params of each Set: the short form, or the long form with transition + delay
+    **dict.fromkeys((OP_ONOFF_SET, OP_ONOFF_SET_UNACK), (2, 4)),
+    **dict.fromkeys((OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK), (3, 5)),
+    **dict.fromkeys((OP_CTL_SET, OP_CTL_SET_UNACK), (7, 9)),
+    **dict.fromkeys((OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), (5, 7)),
+}
 STATUS_INVALID_ADDRESS = 0x01
 STATUS_INVALID_MODEL = 0x02
 DEV_KEY_MODELS = (0x0000, 0x0002)  # Config Server and Health Server: never bound to the AppKey
@@ -187,6 +195,8 @@ class SimNode:
         model = _target_model(opcode)
         if model is not None and (dst, model) not in self.bindings:
             return []
+        if opcode in SET_LENGTHS and len(params) not in SET_LENGTHS[opcode]:
+            return []
         return self._model(dst - self.unicast, opcode, params)
 
     def _model_status(self, element: int, model: int) -> int:
@@ -235,6 +245,9 @@ class SimNode:
             return []
         return [(self.unicast if src is None else src, encode_opcode(status) + params)]
 
+    def _clamp_kelvin(self, kelvin: int) -> int:
+        return min(max(kelvin, self.kelvin_min), self.kelvin_max)
+
     def _set_level(self, lightness: int) -> bool:
         """Apply a Lightness or CTL Set; False when a Tuya quirk ignores it."""
         if self.tuya_quirks and (not self.on or lightness == 0):
@@ -253,8 +266,6 @@ class SimNode:
             return []
         if opcode in (OP_ONOFF_GET, OP_ONOFF_SET, OP_ONOFF_SET_UNACK):
             if opcode != OP_ONOFF_GET:
-                if not params:
-                    return []
                 self.on = bool(params[0])
             return self._reply(opcode, OP_ONOFF_SET_UNACK, OP_ONOFF_STATUS, bytes([int(self.on)]))
         if self.kind == "onoff":
@@ -276,8 +287,6 @@ class SimNode:
             )
         if opcode in (OP_LIGHTNESS_GET, OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK):
             if opcode != OP_LIGHTNESS_GET:
-                if len(params) < 3:
-                    return []
                 self._set_level(struct.unpack_from("<H", params)[0])
             return self._reply(
                 opcode,
@@ -289,11 +298,9 @@ class SimNode:
             return []
         if opcode in (OP_CTL_GET, OP_CTL_SET, OP_CTL_SET_UNACK):
             if opcode != OP_CTL_GET:
-                if len(params) < 7:
-                    return []
                 lightness, kelvin = struct.unpack_from("<HH", params)
                 if self._set_level(lightness):
-                    self.kelvin = kelvin
+                    self.kelvin = self._clamp_kelvin(kelvin)
             return self._reply(
                 opcode,
                 OP_CTL_SET_UNACK,
@@ -308,11 +315,8 @@ class SimNode:
     def _ctl_temperature(self, opcode: int, params: bytes) -> list[tuple[int, bytes]]:
         if opcode not in (OP_CTL_TEMP_GET, OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK):
             return []
-        if opcode != OP_CTL_TEMP_GET:
-            if len(params) < 5:
-                return []
-            if not (self.tuya_quirks and not self.on):
-                self.kelvin = struct.unpack_from("<H", params)[0]
+        if opcode != OP_CTL_TEMP_GET and not (self.tuya_quirks and not self.on):
+            self.kelvin = self._clamp_kelvin(struct.unpack_from("<H", params)[0])
         return self._reply(
             opcode,
             OP_CTL_TEMP_SET_UNACK,
@@ -544,8 +548,9 @@ class SimMesh:
             transport_pdu=transport_pdu,
             iv_index=self.tx_iv_index,
         )
-        if self.filter_type == FILTER_ACCEPT and dst not in self.filter_addresses:
-            return
+        listed = dst in self.filter_addresses
+        if listed != (self.filter_type == FILTER_ACCEPT):
+            return  # not on the accept list, or on the reject list
         self.last_network = pdu
         self._notify(PDU_NETWORK, pdu)
 
@@ -573,12 +578,17 @@ class SimMesh:
         if net is None or self.ignore_proxy_config or not net.transport_pdu:
             return
         message = net.transport_pdu
-        if message[0] == PROXY_OP_SET_FILTER_TYPE and len(message) == 2:
+        opcode = message[0]
+        addresses = {int.from_bytes(message[i : i + 2], "big") for i in range(1, len(message), 2)}
+        if opcode == PROXY_OP_SET_FILTER_TYPE and len(message) == 2:
+            if message[1] not in (FILTER_ACCEPT, FILTER_REJECT):
+                return
             self.filter_type = message[1]
             self.filter_addresses = set()
-        elif message[0] == PROXY_OP_ADD_ADDRESSES and len(message) % 2 == 1:
-            for i in range(1, len(message), 2):
-                self.filter_addresses.add(int.from_bytes(message[i : i + 2], "big"))
+        elif opcode == PROXY_OP_ADD_ADDRESSES and len(message) % 2 == 1:
+            self.filter_addresses |= addresses
+        elif opcode == PROXY_OP_REMOVE_ADDRESSES and len(message) % 2 == 1:
+            self.filter_addresses -= addresses
         else:
             return
         status = bytes([PROXY_OP_FILTER_STATUS, self.filter_type]) + len(
@@ -606,8 +616,10 @@ class SimMesh:
         if not self.accept_replays and last is not None and (iv, net.seq) <= last:
             return  # replayed or older: Mesh Profile 3.8.8
         self._replay[net.src] = (iv, net.seq)
-        if self.filter_type == FILTER_ACCEPT:
+        if self.filter_type == FILTER_ACCEPT:  # Mesh Profile 6.6: the client's src is let through
             self.filter_addresses.add(net.src)
+        else:
+            self.filter_addresses.discard(net.src)
         if net.ctl:
             ack = parse_segment_ack(net.transport_pdu)
             if ack is not None:
@@ -624,6 +636,8 @@ class SimMesh:
             akf, aid, szmic, seq, upper = lower.akf, lower.aid, 0, net.seq, lower.data
         else:
             if self.reject_segments:
+                if self.silent:
+                    return
                 self._send_network(
                     net.dst,
                     net.src,

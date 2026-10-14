@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from mesh.config import (
     STATUS_SUCCESS,
     config_appkey_add,
@@ -9,6 +11,7 @@ from mesh.config import (
     config_node_reset,
     parse_composition_status,
 )
+from mesh.errors import LinkClosedError
 from mesh.models import (
     OP_ONOFF_SET,
     ctl_set,
@@ -22,10 +25,12 @@ from mesh.models import (
 )
 from mesh.pdu import (
     FILTER_ACCEPT,
+    FILTER_REJECT,
     PDU_BEACON,
     PDU_NETWORK,
     PDU_PROXY_CONFIG,
     FilterStatus,
+    NetworkKeys,
     ProxyReassembler,
     SecureBeacon,
     add_addresses,
@@ -39,10 +44,13 @@ from mesh.pdu import (
     set_filter_type,
 )
 from mesh.transport import (
+    SegmentAck,
     SegmentReassembler,
     decrypt_upper,
     encrypt_upper,
     parse_lower_access,
+    parse_segment_ack,
+    segmented_access,
     unsegmented_access,
 )
 from tests.sim.mesh_sim import APP_KEY, CLIENT, TUYA_VENDOR_MODEL, SimMesh, SimNode, run
@@ -396,3 +404,334 @@ def test_reset_node_forgets_segments():
     assert run(scenario()) == [bytes.fromhex("804a")]
     assert node.reset
     assert forgotten == [(0x00B0, 2)]
+
+
+def test_sets_need_the_exact_short_or_long_form():
+    node = light()
+    assert node.handle(0x00B0, onoff_set(True, 1) + b"\x00", dev_key=False) == []
+    assert node.handle(0x00B0, onoff_set(True, 1)[:3], dev_key=False) == []
+    assert node.on is False
+    assert node.handle(0x00B0, onoff_set(True, 2, transition_ms=100), dev_key=False) == [
+        (0x00B0, bytes.fromhex("820401"))
+    ]
+    assert node.handle(0x00B0, lightness_set(1000, 3) + b"\x00", dev_key=False) == []
+    assert node.handle(0x00B0, ctl_set(1000, 3000, 4) + b"\x00", dev_key=False) == []
+    assert node.handle(0x00B1, ctl_temperature_set(3000, 5) + b"\x00", dev_key=False) == []
+    assert (node.lightness, node.kelvin) == (0xFFFF, 4000)
+    node.handle(0x00B0, lightness_set(1000, 6, transition_ms=100), dev_key=False)
+    node.handle(0x00B0, ctl_set(2000, 3000, 7, transition_ms=100), dev_key=False)
+    assert (node.lightness, node.kelvin) == (2000, 3000)
+    node.handle(0x00B1, ctl_temperature_set(5000, 8, transition_ms=100), dev_key=False)
+    assert node.kelvin == 5000
+
+
+def test_kelvin_is_clamped_to_the_node_range():
+    node = light(on=True)
+    assert node.handle(0x00B0, ctl_set(1000, 2000, 1), dev_key=False) == [
+        (0x00B0, bytes.fromhex("8260e8038c0a"))  # 2000 K reported as 2700 K
+    ]
+    assert node.handle(0x00B1, ctl_temperature_set(9000, 2), dev_key=False) == [
+        (0x00B1, bytes.fromhex("826664190000"))  # 9000 K reported as 6500 K
+    ]
+    assert node.kelvin == 6500
+
+
+def client_segments(sim, dst, access, first_seq, *, iv_index=0):
+    """A client app-key message as segmented network PDUs (seqs first_seq, first_seq + 1, ...)."""
+    upper = encrypt_upper(
+        APP_KEY,
+        akf=1,
+        szmic=0,
+        seq=first_seq,
+        src=CLIENT,
+        dst=dst,
+        iv_index=iv_index,
+        access_payload=access,
+    )
+    lowers = segmented_access(upper, akf=1, aid=sim.aid, szmic=0, seq_zero=first_seq)
+    return [
+        encrypt_network_pdu(
+            sim.keys,
+            ctl=0,
+            ttl=5,
+            seq=first_seq + index,
+            src=CLIENT,
+            dst=dst,
+            transport_pdu=lower,
+            iv_index=iv_index,
+        )
+        for index, lower in enumerate(lowers)
+    ]
+
+
+def segment_acks(sim, received, *, iv_index=0):
+    acks = []
+    for pdu_type, payload in messages(received):
+        net = decrypt_network_pdu(sim.keys, payload, iv_index)
+        if pdu_type == PDU_NETWORK and net.ctl:
+            acks.append(parse_segment_ack(net.transport_pdu))
+    return acks
+
+
+def long_ctl_set():
+    return ctl_set(1000, 3000, 1, transition_ms=100)  # 11 bytes: 2 segments with the TransMIC
+
+
+def test_segmented_message_to_node_is_acked_and_answered():
+    sim = SimMesh(iv_index=5)
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        segments = client_segments(sim, node.unicast, long_ctl_set(), 10, iv_index=5)
+        assert len(segments) == 2
+        await write_pdus(transport, *segments)
+        return received
+
+    received = run(scenario())
+    assert segment_acks(sim, received, iv_index=5) == [SegmentAck(False, 10, 0b11)]
+    assert access_replies(sim, received, iv_index=5) == [bytes.fromhex("8260e803b80b")]
+    assert (node.on, node.lightness, node.kelvin) == (True, 1000, 3000)
+
+
+def test_segmented_message_from_node_reassembles():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    access = bytes.fromhex("8260") + bytes(range(16))
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        sim.filter_addresses.add(CLIENT)
+        sim.send_access(node.unicast, CLIENT, access, segmented=True)
+        await asyncio.sleep(0)
+        return messages(received)
+
+    rx = SegmentReassembler()
+    results = []
+    for _, payload in run(scenario()):
+        net = decrypt_network_pdu(sim.keys, payload, 0)
+        results.append(rx.add(net.src, net.seq, parse_lower_access(net.transport_pdu), iv_index=0))
+    assert [result.message is None for result in results] == [True, False]
+    done = results[-1].message
+    assert (
+        decrypt_upper(
+            APP_KEY,
+            akf=1,
+            szmic=0,
+            seq=done.seq_auth,
+            src=node.unicast,
+            dst=CLIENT,
+            iv_index=done.iv_index,
+            upper=done.upper,
+        )
+        == access
+    )
+
+
+def test_silent_gives_no_reply_and_no_ack():
+    sim = SimMesh()
+    sim.silent = True
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        await write_pdus(transport, *client_segments(sim, node.unicast, long_ctl_set(), 1))
+        await write_pdus(transport, client_network_pdu(sim, node.unicast, onoff_get(), seq=3))
+        return received
+
+    assert run(scenario()) == []
+    assert node.lightness == 1000  # still applied, just not answered
+
+
+def test_drop_from_client_loses_the_next_pdu_only():
+    sim = SimMesh()
+    sim.drop_from_client = 1
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        await write_pdus(
+            transport,
+            client_network_pdu(sim, node.unicast, onoff_set(True, 1), seq=1),
+            client_network_pdu(sim, node.unicast, onoff_get(), seq=2),
+        )
+        return access_replies(sim, received)
+
+    assert run(scenario()) == [bytes.fromhex("820400")]
+    assert [pdu.seq for pdu in sim.from_client] == [2]
+    assert node.on is False
+
+
+def test_reject_segments_acks_with_block_ack_zero():
+    sim = SimMesh()
+    sim.reject_segments = True
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        await write_pdus(transport, *client_segments(sim, node.unicast, long_ctl_set(), 1))
+        return received
+
+    received = run(scenario())
+    assert segment_acks(sim, received) == [SegmentAck(False, 1, 0)] * 2
+    assert access_replies(sim, received) == []
+    assert node.lightness == 0xFFFF
+
+
+def test_reject_segments_respects_silent():
+    sim = SimMesh()
+    sim.reject_segments = sim.silent = True
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        await write_pdus(transport, *client_segments(sim, node.unicast, long_ctl_set(), 1))
+        return received
+
+    assert run(scenario()) == []
+
+
+def remove_addresses(*addresses):
+    return bytes([0x02]) + b"".join(a.to_bytes(2, "big") for a in addresses)
+
+
+async def proxy_config(sim, transport, received, *config_messages):
+    """Send proxy configuration messages; return the Filter Statuses that came back."""
+    del received[:]
+    pdus = [
+        encrypt_proxy_config(sim.keys, seq=100 + i, src=CLIENT, iv_index=0, message=message)
+        for i, message in enumerate(config_messages)
+    ]
+    await write_pdus(transport, *pdus, pdu_type=PDU_PROXY_CONFIG)
+    statuses = [
+        parse_filter_status(decrypt_proxy_config(sim.keys, payload, 0).transport_pdu)
+        for _, payload in messages(received)
+    ]
+    del received[:]
+    return statuses
+
+
+async def delivered(sim, received, node, dst):
+    """Whether a status the node sends to dst gets through the proxy filter."""
+    del received[:]
+    sim.send_access(node.unicast, dst, bytes.fromhex("820401"))
+    await asyncio.sleep(0)
+    got_through = bool(received)
+    del received[:]
+    return got_through
+
+
+def test_ignore_proxy_config_sends_no_filter_status():
+    sim = SimMesh()
+    sim.ignore_proxy_config = True
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        return await proxy_config(sim, transport, received, set_filter_type(FILTER_ACCEPT))
+
+    assert run(scenario()) == []
+
+
+def test_accept_filter_drops_unlisted_dst():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        before = await delivered(sim, received, node, 0x0005)
+        await proxy_config(sim, transport, received, add_addresses(0x0005))
+        return before, await delivered(sim, received, node, 0x0005)
+
+    assert run(scenario()) == (False, True)
+
+
+def test_reject_filter_drops_listed_dst():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        statuses = await proxy_config(
+            sim, transport, received, set_filter_type(FILTER_REJECT), add_addresses(0x0005, CLIENT)
+        )
+        listed = await delivered(sim, received, node, 0x0005)
+        unlisted = await delivered(sim, received, node, 0x0006)
+        await write_pdus(transport, client_network_pdu(sim, node.unicast, onoff_get(), seq=1))
+        return statuses, listed, unlisted, access_replies(sim, received)
+
+    statuses, listed, unlisted, replies = run(scenario())
+    assert statuses == [FilterStatus(FILTER_REJECT, 0), FilterStatus(FILTER_REJECT, 2)]
+    assert (listed, unlisted) == (False, True)
+    assert replies == [bytes.fromhex("820400")]  # a client PDU takes its src off the reject list
+    assert sim.filter_addresses == {0x0005}
+
+
+def test_remove_addresses_and_unknown_filter_type():
+    sim = SimMesh()
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        statuses = await proxy_config(
+            sim, transport, received, add_addresses(0x0005, 0x0006), remove_addresses(0x0005)
+        )
+        return statuses, await proxy_config(sim, transport, received, set_filter_type(2))
+
+    statuses, unknown = run(scenario())
+    assert statuses == [FilterStatus(FILTER_ACCEPT, 2), FilterStatus(FILTER_ACCEPT, 1)]
+    assert unknown == []
+    assert (sim.filter_type, sim.filter_addresses) == (FILTER_ACCEPT, {0x0006})
+
+
+def test_send_beacon_overrides():
+    sim = SimMesh()
+    other_key = bytes.fromhex("f7a2a44f8e8a8029064f173ddc1e2b00")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        received = notifications(transport)
+        sim.send_beacon(iv_index=7, iv_update=True)
+        sim.send_beacon(net_key=other_key)
+        await asyncio.sleep(0)
+        return messages(received)
+
+    [(_, overridden), (_, foreign)] = run(scenario())
+    assert parse_secure_beacon(sim.keys, overridden) == SecureBeacon(False, True, 7)
+    assert parse_secure_beacon(sim.keys, foreign) is None
+    assert parse_secure_beacon(NetworkKeys.from_net_key(other_key), foreign) == SecureBeacon(
+        False, False, 0
+    )
+
+
+def test_close_and_drop_disconnect_the_transport():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        events = []
+        for how in ("close", "drop"):
+            transport = sim.connect(beacon=False)
+            received = notifications(transport)
+            transport.set_disconnect_callback(lambda how=how: events.append(how))
+            if how == "close":
+                await transport.close()
+            else:
+                transport.drop()
+            sim.filter_addresses.add(CLIENT)
+            sim.local_change(node, True)
+            await asyncio.sleep(0)
+            assert (transport.is_connected, received) == (False, [])
+            with pytest.raises(LinkClosedError):
+                await transport.write(b"\x00")
+        return events
+
+    assert run(scenario()) == ["close", "drop"]
