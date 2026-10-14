@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = [".", "custom_components/aoi_sig_mesh"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mesh", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/mesh"]
