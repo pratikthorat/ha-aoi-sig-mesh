@@ -1,17 +1,24 @@
 import pytest
 
 from mesh.pdu import (
+    FILTER_ACCEPT,
     MAX_PROXY_MESSAGE,
     PDU_NETWORK,
     PDU_PROXY_CONFIG,
+    FilterStatus,
     NetworkKeys,
     ProxyReassembler,
     SecureBeacon,
+    add_addresses,
     decrypt_network_pdu,
+    decrypt_proxy_config,
     encrypt_network_pdu,
+    encrypt_proxy_config,
     make_secure_beacon,
+    parse_filter_status,
     parse_secure_beacon,
     proxy_pdus,
+    set_filter_type,
 )
 
 SAMPLE_NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
@@ -169,3 +176,31 @@ def test_parse_secure_beacon_rejects_bad_input():
     assert parse_secure_beacon(KEYS, SAMPLE_BEACON[:-1]) is None
     assert parse_secure_beacon(KEYS, b"\x00" + SAMPLE_BEACON[1:]) is None  # unprovisioned type
     assert parse_secure_beacon(KEYS, b"") is None
+
+
+def test_proxy_config_round_trip():
+    message = set_filter_type(FILTER_ACCEPT)
+    pdu = encrypt_proxy_config(KEYS, seq=7, src=0x0001, iv_index=IV, message=message)
+    net = decrypt_proxy_config(KEYS, pdu, IV)
+    assert (net.ctl, net.ttl, net.seq, net.src, net.dst) == (1, 0, 7, 0x0001, 0x0000)
+    assert net.transport_pdu == message
+
+
+def test_proxy_config_nonce_differs_from_network_nonce():
+    pdu = encrypt_proxy_config(KEYS, seq=7, src=0x0001, iv_index=IV, message=b"\x00\x00")
+    assert decrypt_network_pdu(KEYS, pdu, IV) is None
+    net_pdu = encrypt_network_pdu(
+        KEYS, ctl=1, ttl=0, seq=7, src=0x0001, dst=0, transport_pdu=b"\x00\x00", iv_index=IV
+    )
+    assert decrypt_proxy_config(KEYS, net_pdu, IV) is None
+
+
+def test_filter_messages():
+    assert set_filter_type(FILTER_ACCEPT) == b"\x00\x00"
+    assert add_addresses(0x0001, 0x00B0) == bytes.fromhex("01000100b0")
+
+
+def test_parse_filter_status():
+    assert parse_filter_status(bytes.fromhex("03000001")) == FilterStatus(0, 1)
+    assert parse_filter_status(bytes.fromhex("030000")) is None
+    assert parse_filter_status(bytes.fromhex("04000001")) is None

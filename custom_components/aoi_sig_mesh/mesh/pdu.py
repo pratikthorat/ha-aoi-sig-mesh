@@ -223,3 +223,52 @@ def parse_secure_beacon(keys: NetworkKeys, data: bytes) -> SecureBeacon | None:
     if not hmac.compare_digest(data[14:22], _beacon_auth(keys, flags, iv_index)):
         return None
     return SecureBeacon(bool(flags & FLAG_KEY_REFRESH), bool(flags & FLAG_IV_UPDATE), iv_index)
+
+
+FILTER_ACCEPT = 0x00
+FILTER_REJECT = 0x01
+PROXY_OP_SET_FILTER_TYPE = 0x00
+PROXY_OP_ADD_ADDRESSES = 0x01
+PROXY_OP_FILTER_STATUS = 0x03
+
+
+def encrypt_proxy_config(
+    keys: NetworkKeys, *, seq: int, src: int, iv_index: int, message: bytes
+) -> bytes:
+    """Encrypt a proxy configuration message (proxy nonce, CTL=1, TTL=0, DST=0)."""
+    return encrypt_network_pdu(
+        keys,
+        ctl=1,
+        ttl=0,
+        seq=seq,
+        src=src,
+        dst=0x0000,
+        transport_pdu=message,
+        iv_index=iv_index,
+        nonce_type=NONCE_PROXY,
+    )
+
+
+def decrypt_proxy_config(keys: NetworkKeys, pdu: bytes, iv_index: int) -> NetworkPDU | None:
+    """Decrypt a proxy configuration message; None if it does not verify."""
+    return decrypt_network_pdu(keys, pdu, iv_index, nonce_type=NONCE_PROXY)
+
+
+def set_filter_type(filter_type: int) -> bytes:
+    return bytes([PROXY_OP_SET_FILTER_TYPE, filter_type])
+
+
+def add_addresses(*addresses: int) -> bytes:
+    return bytes([PROXY_OP_ADD_ADDRESSES]) + b"".join(a.to_bytes(2, "big") for a in addresses)
+
+
+@dataclass(frozen=True)
+class FilterStatus:
+    filter_type: int
+    list_size: int
+
+
+def parse_filter_status(message: bytes) -> FilterStatus | None:
+    if len(message) != 4 or message[0] != PROXY_OP_FILTER_STATUS:
+        return None
+    return FilterStatus(message[1], int.from_bytes(message[2:4], "big"))
