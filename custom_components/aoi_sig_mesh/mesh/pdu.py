@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hmac
 import struct
 from dataclasses import dataclass
 
-from .crypto import aes_ecb, beacon_key, ccm_decrypt, ccm_encrypt, k2, k3
+from .crypto import aes_cmac, aes_ecb, beacon_key, ccm_decrypt, ccm_encrypt, k2, k3
 from .errors import MeshAuthError
 
 PDU_NETWORK = 0
@@ -175,3 +176,50 @@ class ProxyReassembler:
             self._reset()
             return pdu_type, message
         return None
+
+
+BEACON_SECURE = 0x01
+BEACON_LEN = 22
+FLAG_KEY_REFRESH = 0x01
+FLAG_IV_UPDATE = 0x02
+
+
+@dataclass(frozen=True)
+class SecureBeacon:
+    """An authenticated Secure Network Beacon."""
+
+    key_refresh: bool
+    iv_update: bool
+    iv_index: int
+
+
+def _beacon_auth(keys: NetworkKeys, flags: int, iv_index: int) -> bytes:
+    return aes_cmac(
+        keys.beacon_key, bytes([flags]) + keys.network_id + iv_index.to_bytes(4, "big")
+    )[:8]
+
+
+def make_secure_beacon(
+    keys: NetworkKeys, iv_index: int, *, iv_update: bool = False, key_refresh: bool = False
+) -> bytes:
+    """Build a Secure Network Beacon (the payload of a proxy beacon PDU)."""
+    flags = (FLAG_KEY_REFRESH if key_refresh else 0) | (FLAG_IV_UPDATE if iv_update else 0)
+    return (
+        bytes([BEACON_SECURE, flags])
+        + keys.network_id
+        + iv_index.to_bytes(4, "big")
+        + _beacon_auth(keys, flags, iv_index)
+    )
+
+
+def parse_secure_beacon(keys: NetworkKeys, data: bytes) -> SecureBeacon | None:
+    """Verify a Secure Network Beacon for our network; None if it is not valid."""
+    if len(data) != BEACON_LEN or data[0] != BEACON_SECURE:
+        return None
+    flags = data[1]
+    if data[2:10] != keys.network_id:
+        return None
+    iv_index = int.from_bytes(data[10:14], "big")
+    if not hmac.compare_digest(data[14:22], _beacon_auth(keys, flags, iv_index)):
+        return None
+    return SecureBeacon(bool(flags & FLAG_KEY_REFRESH), bool(flags & FLAG_IV_UPDATE), iv_index)

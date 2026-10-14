@@ -6,8 +6,11 @@ from mesh.pdu import (
     PDU_PROXY_CONFIG,
     NetworkKeys,
     ProxyReassembler,
+    SecureBeacon,
     decrypt_network_pdu,
     encrypt_network_pdu,
+    make_secure_beacon,
+    parse_secure_beacon,
     proxy_pdus,
 )
 
@@ -138,3 +141,31 @@ def test_reassembler_caps_message_size():
     assert rx.feed(b"\x80" + bytes(300)) is None  # over MAX_PROXY_MESSAGE -> dropped
     assert rx.feed(b"\xc0\x01") is None
     assert MAX_PROXY_MESSAGE == 512
+
+
+SAMPLE_BEACON = bytes.fromhex("01003ecaff672f673370123456788ea261582f364f6f")
+
+
+def test_make_secure_beacon_spec_sample():
+    assert make_secure_beacon(KEYS, IV) == SAMPLE_BEACON
+
+
+def test_parse_secure_beacon_spec_sample():
+    assert parse_secure_beacon(KEYS, SAMPLE_BEACON) == SecureBeacon(False, False, IV)
+
+
+def test_beacon_flags_round_trip():
+    data = make_secure_beacon(KEYS, IV + 1, iv_update=True, key_refresh=True)
+    assert data[1] == 0x03
+    assert parse_secure_beacon(KEYS, data) == SecureBeacon(True, True, IV + 1)
+
+
+def test_parse_secure_beacon_rejects_bad_input():
+    other = NetworkKeys.from_net_key(bytes(16))
+    assert parse_secure_beacon(other, SAMPLE_BEACON) is None  # other network
+    forged = bytearray(SAMPLE_BEACON)
+    forged[10] ^= 0x01  # change the IV index without fixing the auth value
+    assert parse_secure_beacon(KEYS, bytes(forged)) is None
+    assert parse_secure_beacon(KEYS, SAMPLE_BEACON[:-1]) is None
+    assert parse_secure_beacon(KEYS, b"\x00" + SAMPLE_BEACON[1:]) is None  # unprovisioned type
+    assert parse_secure_beacon(KEYS, b"") is None
