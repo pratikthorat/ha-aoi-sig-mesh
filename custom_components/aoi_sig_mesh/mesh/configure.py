@@ -18,7 +18,7 @@ from .config import (
     parse_composition_status,
     parse_status_code,
 )
-from .errors import MeshError
+from .errors import LinkClosedError, MeshError, SeqNotSaved
 from .models import (
     KELVIN_MAX,
     KELVIN_MIN,
@@ -140,6 +140,8 @@ async def _config_step(
     try:
         reply = await link.request(node.unicast, access, opcode, dev_key=node.dev_key)
         status = parse_status_code(reply.params)
+    except (LinkClosedError, SeqNotSaved):
+        raise  # the setup was interrupted, not refused: it must run again on the next connect
     except MeshError as err:
         _LOGGER.warning("Node 0x%04X: %s failed: %s", node.unicast, what, err)
         return False
@@ -161,6 +163,8 @@ async def _read_range(link: ProxyLink, node: MeshNode, bound: list[str]) -> tupl
                 attempts=RANGE_ATTEMPTS,
             )
             status = parse_ctl_temperature_range_status(reply.params)
+        except (LinkClosedError, SeqNotSaved):
+            raise  # interrupted, not refused
         except MeshError:
             continue
         low = max(KELVIN_MIN, status.min_kelvin)

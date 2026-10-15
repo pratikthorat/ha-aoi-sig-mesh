@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -14,7 +16,7 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 from custom_components.aoi_sig_mesh import coordinator as coordinator_module
 from custom_components.aoi_sig_mesh.const import DOMAIN
 from custom_components.aoi_sig_mesh.coordinator import POLL_INTERVAL, MeshCoordinator
-from custom_components.aoi_sig_mesh.mesh.models import OP_ONOFF_STATUS, encode_opcode
+from custom_components.aoi_sig_mesh.mesh.models import OP_ONOFF_GET, OP_ONOFF_STATUS, encode_opcode
 from tests.sim.mesh_sim import CLIENT, SimMesh, SimNode
 from tests.sim.sim_radio import SimRadio
 
@@ -95,11 +97,43 @@ async def test_a_drop_reconnects_before_anyone_notices(
 async def test_a_status_with_remaining_time_reads_the_final_state_afterwards(
     hass: HomeAssistant, sim: SimMesh, bulb: SimNode, bulb_entry: Any
 ) -> None:
+    coordinator: MeshCoordinator = bulb_entry.runtime_data
+    record = next(iter(coordinator.nodes.values()))
     # OnOff Status: present off, target on, 500 ms remaining (5 steps of 100 ms).
     sim.send_access(bulb.unicast, CLIENT, encode_opcode(OP_ONOFF_STATUS) + bytes([0, 1, 0x05]))
-    await hass.async_block_till_done()
+    await until(lambda: record.state.on is True)
     received = len(bulb.received)
+
+    # The read comes 1 s later (the transition plus FOLLOW_UP_MARGIN), not before. (The
+    # helper adds 0.5 s of its own, so this fires everything due in the next 0.6 s.)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=0.1))
+    await hass.async_block_till_done()
+    assert len(bulb.received) == received
 
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
 
     await until(lambda: len(bulb.received) > received)
+    assert bulb.received[received][1] == OP_ONOFF_GET
+
+
+async def test_a_poll_is_skipped_while_the_last_round_still_runs(
+    hass: HomeAssistant, bulb_entry: Any
+) -> None:
+    """A slow round (silent nodes, many nodes) must not pile up a second one behind it."""
+    calls: list[int] = []
+    release = asyncio.Event()
+
+    async def blocked(_self: Any) -> int:
+        calls.append(1)
+        await release.wait()
+        return 1
+
+    with patch.object(coordinator_module.NodeCommands, "refresh", blocked):
+        async_fire_time_changed(hass, dt_util.utcnow() + POLL_INTERVAL)
+        await until(lambda: calls)
+        async_fire_time_changed(hass, dt_util.utcnow() + POLL_INTERVAL * 2)
+        await hass.async_block_till_done()
+        release.set()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert len(calls) == 1

@@ -74,12 +74,38 @@ FOLLOW_UP_MARGIN = 0.5  # seconds after a transition ends before reading the fin
 NODE_DATA_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
 
 
+ROLES = (ROLE_LIGHT, ROLE_SWITCH)
+
+
 def read_node(data: Any) -> MeshNode | None:
-    """The node in subentry data, or None when the data is damaged."""
+    """The node in subentry data, or None when the data is damaged.
+
+    The MAC and role are checked here too, so a bad value skips the node instead of failing
+    the whole network.
+    """
     try:
-        return MeshNode.from_dict(dict(data))
+        data = dict(data)
+        mac, role = data.get(CONF_MAC), data.get(CONF_ROLE)
+        if mac is not None and not isinstance(mac, str):
+            return None
+        if role is not None and role not in ROLES:
+            return None
+        return MeshNode.from_dict(data)
     except NODE_DATA_ERRORS:
         return None
+
+
+def claimed_range(data: Any) -> tuple[int, int] | None:
+    """(first address, count) a subentry claims, read as far as damaged data allows."""
+    try:
+        unicast = int(data["unicast"])
+    except NODE_DATA_ERRORS:
+        return None
+    try:
+        count = max(1, int(data.get("element_count", 1)))
+    except NODE_DATA_ERRORS:
+        count = 1
+    return unicast, count
 
 
 def default_role(node: MeshNode) -> str:
@@ -134,6 +160,10 @@ class MeshCoordinator:
         self._save_retry: CALLBACK_TYPE | None = None
         self._save_backoff = SAVE_RETRY_MIN
         self._stopping = False
+        self._shutdown: asyncio.Task[None] | None = None
+        self._save_failed = False  # a save failed since the last one that landed
+        self._refreshing = 0  # running _async_refresh_all passes
+        self._pass_lock = asyncio.Lock()  # one setup-and-read pass at a time
         data = entry.data
         if state is None:
             state = {
@@ -155,9 +185,12 @@ class MeshCoordinator:
         self.network_id = self.network.keys.network_id.hex()
         self.nodes: dict[str, NodeRecord] = {}
         unreadable: list[str] = []
+        claimed: list[tuple[int, int]] = []
         for subentry_id, subentry in entry.subentries.items():
             if subentry.subentry_type != SUBENTRY_NODE:
                 continue
+            if (addresses := claimed_range(subentry.data)) is not None:
+                claimed.append(addresses)
             node = read_node(subentry.data)
             if node is None:
                 _LOGGER.error("%s: the saved device data is damaged; skipped", subentry.title)
@@ -173,7 +206,7 @@ class MeshCoordinator:
                 quirks=quirks_for(node.cid, node.pid),
             )
         self._report_unreadable(unreadable)
-        self._prune_replay()
+        self._prune_replay(claimed)
         idle_minutes = float(entry.options.get(CONF_IDLE_TIMEOUT, DEFAULT_IDLE_TIMEOUT))
         self.manager = ConnectionManager(
             self.network,
@@ -216,14 +249,15 @@ class MeshCoordinator:
             translation_placeholders={"network": self.entry.title, "names": ", ".join(titles)},
         )
 
-    def _prune_replay(self) -> None:
-        """Forget replay entries of addresses no node owns (removed, maybe re-provisioned).
+    def _prune_replay(self, claimed: list[tuple[int, int]]) -> None:
+        """Forget replay entries of addresses no subentry claims (removed, maybe re-provisioned).
 
-        The change is saved by ``async_prime``, which writes the whole state.
+        A damaged subentry still claims its addresses: the node is still on the mesh. The
+        change is saved by ``async_prime``, which writes the whole state.
         """
         for src in list(self.network.persistent_state()["replay"]):
             address = int(src)
-            if not any(record.node.contains(address) for record in self.nodes.values()):
+            if not any(first <= address < first + count for first, count in claimed):
                 self.network.forget_replay(address, 1)
 
     def _dev_key_for(self, address: int) -> bytes | None:
@@ -290,10 +324,18 @@ class MeshCoordinator:
     def _on_saved(self, state: dict[str, Any]) -> None:
         self.network.mark_persisted(state)
         self._save_backoff = SAVE_RETRY_MIN
+        if not self._save_failed:
+            return
+        self._save_failed = False
+        # Setup and reads were skipped (SeqNotSaved) while the saves failed: catch up now
+        # rather than at the next drop. Without a link, the next connect does it anyway.
+        if not self._stopping and (link := self.manager.link) is not None:
+            self._spawn(self._async_connect_pass(link), "aoi_sig_mesh catch-up")
 
     @callback
     def _on_save_failed(self) -> None:
         """Without a retry ``next_seq`` never reserves again and every send is refused."""
+        self._save_failed = True
         if self._stopping or self._save_retry is not None:
             return
         delay = self._save_backoff
@@ -343,10 +385,18 @@ class MeshCoordinator:
         self._unsubs.append(self.radio.subscribe(self._on_advert))
 
     async def async_shutdown(self) -> None:
-        """Stop everything and write the mesh state (seq ceiling, IV, replay cache)."""
-        if self._stopping:
-            return
-        self._stopping = True
+        """Stop everything and write the mesh state (seq ceiling, IV, replay cache).
+
+        A second call (HA stopping while the entry unloads) waits for the same shutdown.
+        """
+        if self._shutdown is None:
+            self._stopping = True
+            self._shutdown = self.hass.async_create_task(
+                self._async_stop(), "aoi_sig_mesh shutdown"
+            )
+        await asyncio.shield(self._shutdown)
+
+    async def _async_stop(self) -> None:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -380,14 +430,25 @@ class MeshCoordinator:
         self.rssi, self.rssi_seen = proxy.rssi, proxy.seen
         self._update_rssi()
         self._notify(None)
-        for record in list(self.nodes.values()):
-            if not record.configured:
-                await self._async_configure(link, record)
-        await self._async_refresh_all(link)
+        await self._async_connect_pass(link)
         self._check_keys()
+
+    async def _async_connect_pass(self, link: ProxyLink) -> None:
+        """Set up the nodes that are not set up yet, then read every node's state.
+
+        One pass at a time, so a catch-up after a failed save never sets up a node twice.
+        """
+        async with self._pass_lock:
+            for record in list(self.nodes.values()):
+                if not record.configured and link.is_connected:
+                    await self._async_configure(link, record)
+            await self._async_refresh_all(link)
 
     @callback
     def _on_disconnected(self) -> None:
+        # "Heard since connecting": reset here, not in _async_on_connected, because the
+        # proxy's first beacon arrives while the link is still starting (before that runs).
+        self._heard = False
         self._notify(None)
         if not self._stopping:
             self._link_down()
@@ -439,14 +500,12 @@ class MeshCoordinator:
 
     def _check_keys(self) -> None:
         """Nothing decrypted since connecting (no status, no beacon): the keys are wrong."""
-        issue_id = f"{ISSUE_KEYS_REJECTED}_{self.entry.entry_id}"
         if self._heard:
-            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
-            return
+            return  # _on_heard already deleted the issue
         ir.async_create_issue(
             self.hass,
             DOMAIN,
-            issue_id,
+            f"{ISSUE_KEYS_REJECTED}_{self.entry.entry_id}",
             is_fixable=False,
             severity=ir.IssueSeverity.ERROR,
             translation_key=ISSUE_KEYS_REJECTED,
@@ -456,8 +515,15 @@ class MeshCoordinator:
     # mesh traffic
 
     @callback
+    def _on_heard(self) -> None:
+        """Something decrypted: the keys are right."""
+        if not self._heard:
+            self._heard = True
+            ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_KEYS_REJECTED}_{self.entry.entry_id}")
+
+    @callback
     def _on_message(self, message: AccessMessage) -> None:
-        self._heard = True
+        self._on_heard()
         record = self.record_for(message.src)
         if record is None:
             return
@@ -475,10 +541,13 @@ class MeshCoordinator:
 
     @callback
     def _on_beacon(self, beacon: SecureBeacon, outcome: BeaconOutcome) -> None:
-        self._heard = True
+        self._on_heard()
         issue_id = f"{ISSUE_IV_INDEX_JUMP}_{self.entry.entry_id}"
         if outcome is BeaconOutcome.TOO_FAR:
-            _LOGGER.warning(
+            # Proxies repeat their beacon every few seconds: warn once per IV index.
+            pending = self.pending_iv_jump
+            repeat = pending is not None and pending.iv_index == beacon.iv_index
+            (_LOGGER.debug if repeat else _LOGGER.warning)(
                 "%s: beacon IV index %d is more than one step past ours (%d); not applied",
                 self.entry.title,
                 beacon.iv_index,
@@ -526,7 +595,7 @@ class MeshCoordinator:
         try:
             async with asyncio.timeout(CONFIGURE_TIMEOUT):
                 result = await configure_node(link, self.network, node, publish=publish)
-        except (ConfigureError, TimeoutError, SeqNotSaved) as err:
+        except (ConfigureError, LinkClosedError, TimeoutError, SeqNotSaved) as err:
             _LOGGER.warning(
                 "%s: setup on the mesh failed, retrying next connect: %s", record.title, err
             )
@@ -555,12 +624,16 @@ class MeshCoordinator:
         )
 
     async def _async_refresh_all(self, link: ProxyLink) -> None:
-        for index, record in enumerate(list(self.nodes.values())):
-            if index:
-                await asyncio.sleep(REFRESH_STAGGER)
-            if not link.is_connected:
-                return
-            await self._async_refresh(link, record)
+        self._refreshing += 1
+        try:
+            for index, record in enumerate(list(self.nodes.values())):
+                if index:
+                    await asyncio.sleep(REFRESH_STAGGER)
+                if not link.is_connected:
+                    return
+                await self._async_refresh(link, record)
+        finally:
+            self._refreshing -= 1
 
     async def _async_refresh(self, link: ProxyLink, record: NodeRecord) -> None:
         try:
@@ -573,6 +646,9 @@ class MeshCoordinator:
             self.manager.touch()  # only get_link() counts as activity: a long read is too
 
     async def _async_poll(self, _now: datetime) -> None:
+        if self._refreshing:
+            _LOGGER.debug("%s: the last round of reads is still running", self.entry.title)
+            return
         if (link := self.manager.link) is not None:
             self._spawn(self._async_refresh_all(link), "aoi_sig_mesh poll")
 

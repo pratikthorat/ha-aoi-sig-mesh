@@ -1,9 +1,10 @@
 import pytest
 
 from mesh import proxy
-from mesh.config import CompositionData, Element
+from mesh.config import OP_MODEL_APP_STATUS, CompositionData, Element
 from mesh.configure import ConfigureError, configure_node
-from mesh.models import OP_CTL_TEMP_RANGE_GET
+from mesh.errors import LinkClosedError, SeqNotSaved
+from mesh.models import OP_CTL_TEMP_RANGE_GET, OP_CTL_TEMP_RANGE_STATUS
 from mesh.network import MeshNetwork
 from mesh.node import KELVIN_DEFAULT_MAX, KELVIN_DEFAULT_MIN, MeshNode
 from mesh.proxy import ProxyLink
@@ -228,3 +229,44 @@ def test_no_range_read_when_neither_ctl_role_is_bound():
     _, result = configure(sim, bulb)
     assert result.kelvin_range is None
     assert not [1 for _, op, _ in bulb.received if op == OP_CTL_TEMP_RANGE_GET]
+
+
+def fail_at(link, opcode, error):
+    """Make every request answered by ``opcode`` raise ``error`` (the link dropped, or a seq
+    block was not saved yet); everything else goes through."""
+    real = link.request
+
+    async def request(dst, access, response_opcode, **kwargs):
+        if response_opcode == opcode:
+            raise error("interrupted")
+        return await real(dst, access, response_opcode, **kwargs)
+
+    link.request = request
+
+
+@pytest.mark.parametrize("error", [LinkClosedError, SeqNotSaved])
+def test_a_link_failure_at_a_bind_propagates(error):
+    """Swallowed, it would leave nothing bound and the node saved as configured for good."""
+
+    async def scenario():
+        sim = SimMesh()
+        bulb = sim.add_node("ctl", configured=False)
+        network, link = await open_link(sim)
+        fail_at(link, OP_MODEL_APP_STATUS, error)
+        with pytest.raises(error):
+            await configure_node(link, network, bare_node(bulb), publish=True)
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("error", [LinkClosedError, SeqNotSaved])
+def test_a_link_failure_at_the_range_read_propagates(error):
+    async def scenario():
+        sim = SimMesh()
+        bulb = sim.add_node("ctl", configured=False)
+        network, link = await open_link(sim)
+        fail_at(link, OP_CTL_TEMP_RANGE_STATUS, error)
+        with pytest.raises(error):
+            await configure_node(link, network, bare_node(bulb), publish=True)
+
+    run(scenario())
