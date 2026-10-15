@@ -380,3 +380,36 @@ async def test_a_save_that_never_finishes_raises_seq_not_saved(
     assert err.value.translation_key == "seq_not_saved"
     assert coordinator.nodes[sid].state.on is False
     assert coordinator.nodes[sid].failures == 0
+
+
+@pytest.mark.parametrize("order", [("A", "B"), ("B", "A")], ids=["A-then-B", "B-then-A"])
+async def test_two_overlapping_failures(
+    hass: HomeAssistant, bulb: SimNode, bulb_entry: Any, order: tuple[str, str]
+) -> None:
+    """A (plain turn-on) and B (50 %) overlap and both go unanswered: the bulb stayed off."""
+    coordinator, sid = lamp(bulb_entry)
+    await coordinator.async_turn_off(sid)
+    record = coordinator.nodes[sid]
+    gates = {"A": asyncio.Event(), "B": asyncio.Event()}
+    entered: set[str] = set()
+
+    async def unanswered(self: NodeCommands, **kwargs: Any) -> None:
+        name = "A" if kwargs.get("lightness") is None else "B"
+        entered.add(name)
+        await gates[name].wait()  # nothing reaches the bulb; no real timeout is driven
+        raise MeshTimeout("no answer")
+
+    with patch.object(NodeCommands, "turn_on", unanswered):
+        commands = {"A": hass.async_create_task(coordinator.async_turn_on(sid))}
+        await until(lambda: "A" in entered)
+        commands["B"] = hass.async_create_task(coordinator.async_turn_on(sid, lightness=0x8000))
+        await until(lambda: "B" in entered)
+        assert record.state.on is True  # both optimistic
+        for name in order:
+            gates[name].set()
+            with pytest.raises(HomeAssistantError):
+                await commands[name]
+
+    assert bulb.on is False
+    assert record.state.on is False
+    assert record.state == record.confirmed

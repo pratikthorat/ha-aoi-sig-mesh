@@ -141,6 +141,7 @@ class NodeRecord:
     confirmed: NodeState = field(default_factory=NodeState)  # only what statuses said
     generation: int = 0  # bumped by every status applied and every command started
     command_generation: int = 0  # the generation the newest command took
+    pending: int = 0  # commands begun and not finished yet
     available: bool = True
     failures: int = 0
     last_seen: datetime | None = None
@@ -754,6 +755,9 @@ class MeshCoordinator:
         except BaseException:  # cancelled
             self._revert(record, before, generation)
             raise
+        finally:
+            if before is not None:  # begun with _begin
+                record.pending -= 1
         self.manager.touch()
 
     async def _async_command_link(self) -> ProxyLink | None:
@@ -789,6 +793,7 @@ class MeshCoordinator:
         """A command starts (after its optimistic state): returns its generation."""
         record.generation += 1
         record.command_generation = record.generation
+        record.pending += 1
         self._notify(record.subentry_id)
         return record.generation
 
@@ -796,13 +801,17 @@ class MeshCoordinator:
     def _revert(self, record: NodeRecord, before: NodeState | None, generation: int) -> None:
         """Undo a failed command's optimistic state, but never over anything newer.
 
-        Nothing happened since the command started: restore ``before``. Only statuses came
-        in since: they are the truth, so drop the optimistic fields still on top of them. A
-        newer command started: its optimistic state stays.
+        No other command is pending: settle on what the node said (``before`` may still hold
+        an older command's optimism, and that command has failed too). Otherwise: nothing
+        happened since the command started, so restore ``before``; only statuses came in, so
+        drop the optimistic fields still on top of them; or a newer command started, so its
+        optimistic state stays.
         """
         if before is None:
             return
-        if record.generation == generation:
+        if record.pending == 1:  # only this command (it is counted until it returns)
+            record.state = replace(record.confirmed)
+        elif record.generation == generation:
             record.state = before
         elif record.command_generation == generation:
             record.state = replace(record.confirmed)
