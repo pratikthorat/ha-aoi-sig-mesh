@@ -444,3 +444,17 @@ def test_random_deferred_saves_never_reuse_a_nonce():
                 net.prime()
             else:
                 net = store.start()  # crash: only the last confirmed state survives
+
+
+def test_take_replay_dirty_reports_replay_cache_changes_once():
+    net = make()
+    assert net.take_replay_dirty() is False
+    assert net.accept_replay(0x00B0, 5, 0)
+    assert net.take_replay_dirty() is True
+    assert net.take_replay_dirty() is False  # cleared by the previous call
+    assert not net.accept_replay(0x00B0, 5, 0)  # rejected: nothing changed
+    assert net.take_replay_dirty() is False
+    net.forget_replay(0x00C0, 1)  # no entry to remove
+    assert net.take_replay_dirty() is False
+    net.forget_replay(0x00B0, 1)
+    assert net.take_replay_dirty() is True

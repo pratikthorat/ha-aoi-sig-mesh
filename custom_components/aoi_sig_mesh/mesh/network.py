@@ -70,6 +70,7 @@ class MeshNetwork:
         for src, (iv, seq) in self._replay.items():
             if not (0 <= iv <= IV_INDEX_MAX and 0 <= seq <= SEQ_MAX):
                 raise ValueError(f"stored replay entry for 0x{src:04X} is out of range")
+        self._replay_dirty = False
         self._on_persist = on_persist
         self._persist_is_durable = persist_is_durable
         # The highest saved (transmit IV index, seq ceiling). A restored state came from disk.
@@ -151,12 +152,24 @@ class MeshNetwork:
         if last is not None and (iv_index, seq) <= last:
             return False
         self._replay[src] = (iv_index, seq)
+        self._replay_dirty = True
         return True
 
     def forget_replay(self, first: int, count: int) -> None:
         """Clear the cache for a node's elements, e.g. after it is reset and re-provisioned."""
         for src in range(first, first + count):
-            self._replay.pop(src, None)
+            if self._replay.pop(src, None) is not None:
+                self._replay_dirty = True
+
+    def take_replay_dirty(self) -> bool:
+        """True if the replay cache changed since the last call, which clears the flag.
+
+        Replay updates are not persisted one by one: poll this on a debounced save timer
+        and at shutdown, and save ``persistent_state()`` when it returns True.
+        """
+        dirty = self._replay_dirty
+        self._replay_dirty = False
+        return dirty
 
     @property
     def iv_index(self) -> int:
