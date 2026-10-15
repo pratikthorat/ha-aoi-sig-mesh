@@ -18,7 +18,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.aoi_sig_mesh.const import DOMAIN, SUBENTRY_NODE
-from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
+from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator, entry_device
 from tests.sim.mesh_sim import SimMesh
 from tests.sim.sim_radio import SimRadio
 
@@ -222,14 +222,14 @@ async def test_setup_updates_the_device_info_without_a_reload(
     coordinator = await setup_entry(hass, entry)
     sid = next(iter(entry.subentries))
     identifier = (DOMAIN, f"{NETWORK_ID}_00b0")
-    device = dr.async_get(hass).async_get_device(identifiers={identifier})
+    device = entry_device(hass, entry.entry_id, identifier)
     assert device is not None and device.manufacturer is None
 
     await until(lambda: entry.subentries[sid].data["configured"] is True)
     await hass.async_block_till_done()
 
     assert entry.runtime_data is coordinator  # nothing reloaded
-    device = dr.async_get(hass).async_get_device(identifiers={identifier})
+    device = entry_device(hass, entry.entry_id, identifier)
     assert device.manufacturer == "Tuya"
     assert device.model is not None
     await hass.config_entries.async_unload(entry.entry_id)

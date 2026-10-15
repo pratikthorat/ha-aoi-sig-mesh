@@ -30,7 +30,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from custom_components.aoi_sig_mesh.const import ROLE_LIGHT
+from custom_components.aoi_sig_mesh import entity as entity_module
+from custom_components.aoi_sig_mesh.const import DOMAIN, ROLE_LIGHT
 from custom_components.aoi_sig_mesh.light import (
     brightness_to_lightness,
     lightness_to_brightness,
@@ -135,6 +136,28 @@ async def test_node_devices_have_no_bluetooth_connections(
     assert device.connections == set()
     assert device.via_device_id is not None
     assert registry.async_get(device.via_device_id).entry_type is dr.DeviceEntryType.SERVICE
+
+
+@pytest.mark.parametrize("by_id", [True, False])
+async def test_node_devices_link_to_the_network_the_way_this_version_wants(
+    hass: HomeAssistant, bulb_entry: Any, monkeypatch: pytest.MonkeyPatch, by_id: bool
+) -> None:
+    """Home Assistant 2026.8 links by device id and deprecates via_device; older versions
+    accept only via_device."""
+    monkeypatch.setattr(entity_module, "VIA_DEVICE_ID", by_id)
+    coordinator = bulb_entry.runtime_data
+    network = dr.async_get(hass).async_get_or_create(
+        config_entry_id=bulb_entry.entry_id, identifiers={(DOMAIN, coordinator.network_id)}
+    )
+
+    info = entity_module.node_device_info(coordinator, first_record(bulb_entry))
+
+    if by_id:
+        assert info["via_device_id"] == network.id
+        assert "via_device" not in info
+    else:
+        assert info["via_device"] == (DOMAIN, coordinator.network_id)
+        assert "via_device_id" not in info
 
 
 def first_record(entry: Any) -> Any:

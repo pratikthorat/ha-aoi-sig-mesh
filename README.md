@@ -65,7 +65,7 @@ The export holds your network keys, so delete it once the import is done. Home A
 
 If a SIG Mesh device runs on the `tuya_ble_mesh` custom integration today, **Import from Tuya BLE Mesh** copies its keys and device across. Nothing is reset or re-paired.
 
-Leave **Disable the old entry** on. The old entry is disabled, because the two integrations would fight over the device's Bluetooth connection.
+Leave **Disable the old entry** on. The old entry is disabled, because the two integrations would fight over the device's Bluetooth connection. The new network connects only once the old entry has let go. If both stay enabled, the connection keeps passing between them, and a tap can hang for 15 seconds and then flip back.
 
 `tuya_ble_mesh` has one entry per device, so import them one at a time. The first import creates the network; each later device from the same mesh joins it.
 

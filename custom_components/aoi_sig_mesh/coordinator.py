@@ -15,6 +15,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.util import dt as dt_util
 
@@ -134,6 +135,40 @@ def capabilities(node: MeshNode) -> tuple[Any, ...]:
         node.kelvin_max,
         ROLE_HEALTH in node.models and not node.is_light,
     )
+
+
+def held_networks(hass: HomeAssistant) -> set[str]:
+    """Networks being imported from tuya_ble_mesh that must not connect yet.
+
+    The device takes one Bluetooth connection. Until the import flow has disabled the old
+    entry, that entry holds it, and its unload would drop ours mid-setup.
+    """
+    held: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault("held", set())
+    return held
+
+
+def released_signal(network_id: str) -> str:
+    return f"{DOMAIN}_released_{network_id}"
+
+
+@callback
+def release_network(hass: HomeAssistant, network_id: str) -> None:
+    """Let a held network connect: its entry, if loaded, starts now; a later setup at once."""
+    if network_id in held_networks(hass):
+        held_networks(hass).discard(network_id)
+        async_dispatcher_send(hass, released_signal(network_id))
+
+
+def entry_device(
+    hass: HomeAssistant, entry_id: str, identifier: tuple[str, str]
+) -> dr.DeviceEntry | None:
+    """The entry's device with ``identifier``.
+
+    ``async_get_device`` is deprecated from Home Assistant 2026.8, and its replacement does not
+    exist before then: this works on both.
+    """
+    devices = dr.async_entries_for_config_entry(dr.async_get(hass), entry_id)
+    return next((device for device in devices if identifier in device.identifiers), None)
 
 
 @dataclass
@@ -719,14 +754,13 @@ class MeshCoordinator:
     @callback
     def _update_device_info(self, record: NodeRecord) -> None:
         """Composition supplies manufacturer, model and version without a reload."""
-        registry = dr.async_get(self.hass)
         identifier = (DOMAIN, f"{self.network_id}_{record.node.unicast:04x}")
-        if (device := registry.async_get_device(identifiers={identifier})) is None:
+        if (device := entry_device(self.hass, self.entry.entry_id, identifier)) is None:
             return
         from .entity import node_device_info  # entity imports this module
 
         info = node_device_info(self, record)
-        registry.async_update_device(
+        dr.async_get(self.hass).async_update_device(
             device.id,
             manufacturer=info.get("manufacturer"),
             model=info.get("model"),

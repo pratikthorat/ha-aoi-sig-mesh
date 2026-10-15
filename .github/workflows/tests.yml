@@ -22,15 +22,27 @@ jobs:
 
   ha:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Home Assistant we support (hacs.json), and the newest: the tests fail on
+          # any deprecated call, so the newest one warns us before a release breaks us.
+          - name: oldest
+            pins: >-
+              homeassistant==2026.5.4 pytest-homeassistant-custom-component==0.13.333
+              aiousbwatcher==1.1.2 serialx==1.7.3 aioesphomeapi==44.24.1
+          - name: newest
+            pins: >-
+              homeassistant==2026.10.1 pytest-homeassistant-custom-component==0.13.372
+              aiousbwatcher==1.1.2 serialx==1.11.0
+    name: ha (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-      - run: >-
-          pip install homeassistant==2026.5.4
-          pytest-homeassistant-custom-component==0.13.333
-          aiousbwatcher==1.1.2 serialx==1.7.3 aioesphomeapi==44.24.1
+      - run: pip install ${{ matrix.pins }}
       # Test the Bluetooth libraries this HA version really runs, not the newest ones pip finds.
       - run: pip install $(python tools/ci_ha_pins.py)
       - run: pip list | grep -iE "^(homeassistant|habluetooth|bleak|bleak-retry-connector) "

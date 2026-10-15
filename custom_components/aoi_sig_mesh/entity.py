@@ -6,7 +6,11 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from .const import DOMAIN, MANUFACTURER, MANUFACTURERS
-from .coordinator import MeshCoordinator, NodeRecord
+from .coordinator import MeshCoordinator, NodeRecord, entry_device
+
+# Home Assistant 2026.8 links a device to its parent by device id, and drops via_device (an
+# identifier) in 2027.8. Older versions accept only via_device.
+VIA_DEVICE_ID = "via_device_id" in DeviceInfo.__optional_keys__
 
 
 def network_device_info(coordinator: MeshCoordinator) -> DeviceInfo:
@@ -25,14 +29,21 @@ def node_device_info(coordinator: MeshCoordinator, record: NodeRecord) -> Device
     manufacturer = None
     if node.cid is not None:
         manufacturer = MANUFACTURERS.get(node.cid, f"CID 0x{node.cid:04X}")
-    return DeviceInfo(
+    info = DeviceInfo(
         identifiers={(DOMAIN, f"{coordinator.network_id}_{node.unicast:04x}")},
         name=record.title,
         manufacturer=manufacturer,
         model=None if node.pid is None else f"PID 0x{node.pid:04X}",
         sw_version=None if node.vid is None else f"VID 0x{node.vid:04X}",
-        via_device=(DOMAIN, coordinator.network_id),
     )
+    network = (DOMAIN, coordinator.network_id)
+    if not VIA_DEVICE_ID:
+        info["via_device"] = network
+    elif (
+        device := entry_device(coordinator.hass, coordinator.entry.entry_id, network)
+    ) is not None:
+        info["via_device_id"] = device.id  # type: ignore[typeddict-unknown-key]
+    return info
 
 
 class AoiEntity(Entity):

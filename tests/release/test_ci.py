@@ -39,6 +39,16 @@ def test_ci_installs_the_pinned_ha_and_its_bluetooth_pins() -> None:
     assert "tools/ci_ha_pins.py" in text
 
 
+def test_ci_tests_the_oldest_and_a_newer_ha() -> None:
+    workflow = yaml.safe_load((WORKFLOWS / "tests.yml").read_text())
+    rows = workflow["jobs"]["ha"]["strategy"]["matrix"]["include"]
+    versions = [re.search(r"homeassistant==([\d.]+)", row["pins"]).group(1) for row in rows]
+    as_tuples = [tuple(int(part) for part in v.split(".")) for v in versions]
+    assert as_tuples[0] == min(as_tuples) and len(set(as_tuples)) == len(as_tuples) >= 2
+    for row in rows:  # the harness pins one HA version: they must match
+        assert "pytest-homeassistant-custom-component==" in row["pins"]
+
+
 def steps(name: str) -> list[dict]:
     workflow = yaml.safe_load((WORKFLOWS / name).read_text())
     return [step for job in workflow["jobs"].values() for step in job["steps"]]

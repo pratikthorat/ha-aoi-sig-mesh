@@ -24,6 +24,7 @@ from homeassistant.helpers.service_info.bluetooth import BluetoothServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.aoi_sig_mesh.const import DOMAIN, PROXY_SERVICE_UUID, TUYA_DOMAIN
+from custom_components.aoi_sig_mesh.coordinator import held_networks
 from custom_components.aoi_sig_mesh.store import AddressBook, _StrictStore
 from tests.sim.mesh_sim import APP_KEY, NET_KEY, SimNode
 
@@ -428,6 +429,20 @@ async def test_the_old_entry_is_still_enabled_while_the_new_one_is_set_up(
 
     assert seen == [None]
     assert source.disabled_by is ConfigEntryDisabler.USER
+
+
+async def test_a_failed_creation_holds_nothing_back(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+    flow_id = await open_disable_old(hass, source)
+
+    with (
+        patch.object(hass.config_entries, "async_add", side_effect=HomeAssistantError),
+        pytest.raises(HomeAssistantError),
+    ):
+        await hass.config_entries.flow.async_configure(flow_id, {"disable_old": True})
+    hass.config_entries.flow.async_abort(flow_id)  # the user closes the dialog
+
+    assert not held_networks(hass)
 
 
 async def test_a_failed_creation_leaves_the_old_entry_enabled(hass: HomeAssistant) -> None:

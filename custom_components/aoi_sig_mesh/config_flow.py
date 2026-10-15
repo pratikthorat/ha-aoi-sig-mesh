@@ -75,7 +75,14 @@ from .const import (
     SUBENTRY_NODE,
     TUYA_DOMAIN,
 )
-from .coordinator import claimed_range, default_role, node_role, read_node
+from .coordinator import (
+    claimed_range,
+    default_role,
+    held_networks,
+    node_role,
+    read_node,
+    release_network,
+)
 from .mesh.errors import NoMeshLink
 from .mesh.importers import (
     NODE_RANGE_HIGH,
@@ -332,6 +339,7 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
         self._existing: ConfigEntry | None = None
         self._name = DEFAULT_NETWORK_NAME
         self._disable_old = False
+        self._held: str | None = None  # the network held back from connecting
         self._ignored: ConfigEntry | None = None
 
     @staticmethod
@@ -734,6 +742,9 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
         ) or not await self._async_reserve_nodes(network_id, block):
             return self.async_abort(reason="cannot_save")
         await self._async_clear_ignored(ignored)
+        if self._disable_old:
+            self._held = network_id  # async_on_create_entry starts it
+            held_networks(self.hass).add(network_id)
         return self.async_create_entry(
             title=self._name,
             data=network_data(
@@ -765,12 +776,29 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
 
     async def async_on_create_entry(self, result: ConfigFlowResult) -> ConfigFlowResult:
         """Runs once the network entry exists and is set up: only now is the old entry
-        disabled, and then our entities take over its entity ids."""
-        await self._async_disable_old()
-        source = self._source
-        if self._disable_old and source is not None and source.disabled_by is not None:
-            take_over_entity_ids(self.hass, source.entry_id, result["result"].entry_id)
+        disabled, and then our entities take over its entity ids. A failed creation leaves
+        it as it was.
+
+        The entry was set up without connecting (``held_networks``): it connects once the old
+        entry has let go of the device. If its setup failed, its retry connects.
+        """
+        entry = result["result"]
+        try:
+            await self._async_disable_old()
+            source = self._source
+            if self._disable_old and source is not None and source.disabled_by is not None:
+                take_over_entity_ids(self.hass, source.entry_id, entry.entry_id)
+        finally:
+            if self._held is not None:
+                release_network(self.hass, self._held)
+                self._held = None
         return result
+
+    @callback
+    def async_remove(self) -> None:
+        """The flow ended: a creation that failed leaves nothing held."""
+        if self._held is not None:
+            release_network(self.hass, self._held)
 
 
 @callback

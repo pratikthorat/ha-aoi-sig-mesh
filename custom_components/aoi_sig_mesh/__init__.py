@@ -8,6 +8,7 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .config_flow import give_back_entity_ids
 from .const import (
@@ -18,7 +19,7 @@ from .const import (
     ISSUE_NODE_UNREADABLE,
     ROLE_LIGHT,
 )
-from .coordinator import MeshCoordinator
+from .coordinator import MeshCoordinator, held_networks, released_signal
 from .entity import network_device_info
 from .radio import HaBluetoothRadio
 from .store import NetworkStore
@@ -46,7 +47,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool:
         config_entry_id=entry.entry_id, **network_device_info(coordinator)
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    coordinator.start()
+    if entry.unique_id in held_networks(hass):  # the import flow releases it
+        entry.async_on_unload(
+            async_dispatcher_connect(hass, released_signal(entry.unique_id), coordinator.start)
+        )
+    else:
+        coordinator.start()
     if coordinator.needs_reload():
         # Changed while we set up: the update listener skipped it (not loaded yet). The
         # reload waits for this setup to finish.

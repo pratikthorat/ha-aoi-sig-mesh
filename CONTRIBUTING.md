@@ -18,7 +18,9 @@ python3 -m venv .venv
 .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/pytest -q
 ```
 
-The Home Assistant tests need Python 3.14 and the versions in `.github/workflows/tests.yml`:
+The Home Assistant tests need Python 3.14 and the versions in `.github/workflows/tests.yml`. CI
+runs them on the oldest Home Assistant we support and on a recent one, and a test fails on any
+call Home Assistant reports as deprecated. For the oldest:
 
 ```sh
 python3.14 -m venv .venv-ha

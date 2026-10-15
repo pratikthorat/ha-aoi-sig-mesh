@@ -10,7 +10,7 @@ import asyncio
 import importlib
 import pkgutil
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +72,19 @@ def auto_enable_custom_integrations(enable_custom_integrations: None, hass: Home
     (the manager, real scanners) must override this fixture in its own module.
     """
     hass.config.components.add("bluetooth")
+
+
+@pytest.fixture(autouse=True)
+def no_deprecated_calls(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    """Home Assistant logs a frame report for each deprecated call we make, and the call
+    breaks a few versions later: fail the test instead."""
+    yield
+    reports = [
+        record.getMessage()
+        for record in caplog.get_records("call")
+        if record.name == "homeassistant.helpers.frame" and DOMAIN in record.getMessage()
+    ]
+    assert not reports, reports
 
 
 @pytest.fixture(autouse=True)
