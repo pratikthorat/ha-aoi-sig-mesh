@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import enum
+import logging
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +16,8 @@ SEQ_BLOCK = 64
 RESERVE_MARGIN = SEQ_BLOCK // 2  # reserve the next block this far before the ceiling
 SEQ_MAX = 0xFFFFFF
 IV_INDEX_MAX = 0xFFFFFFFF
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class BeaconOutcome(enum.Enum):
@@ -71,6 +75,7 @@ class MeshNetwork:
             if not (0 <= iv <= IV_INDEX_MAX and 0 <= seq <= SEQ_MAX):
                 raise ValueError(f"stored replay entry for 0x{src:04X} is out of range")
         self._replay_dirty = False
+        self.replay_drops: Counter[int] = Counter()  # per src, since start
         self._on_persist = on_persist
         self._persist_is_durable = persist_is_durable
         # The highest saved (transmit IV index, seq ceiling). A restored state came from disk.
@@ -104,7 +109,10 @@ class MeshNetwork:
             self._durable_ceiling = ceiling
 
     def mark_persisted(self, state: dict[str, Any]) -> None:
-        """Confirm that ``state`` (exactly as given to ``on_persist``) is now on disk."""
+        """Confirm that ``state`` (exactly as given to ``on_persist``) is now on disk.
+
+        If a save fails, call prime() and save again.
+        """
         tx_iv_index = _tx_iv_index(int(state["iv_index"]), bool(state["iv_update"]))
         self._mark_durable(tx_iv_index, int(state["seq"]))
 
@@ -122,7 +130,8 @@ class MeshNetwork:
         """Reserve and persist the next block now, before any seq is needed.
 
         With an async store, await the save and ``mark_persisted`` before starting a link,
-        so the first message after a restart is not refused.
+        so the first message after a restart is not refused. If a save fails, call prime()
+        and save again.
         """
         self._reserve(min(max(self._ceiling, self._seq + SEQ_BLOCK), SEQ_MAX + 1))
 
@@ -150,6 +159,16 @@ class MeshNetwork:
         """Replay protection: accept only a newer (iv_index, seq) than last seen from src."""
         last = self._replay.get(src)
         if last is not None and (iv_index, seq) <= last:
+            self.replay_drops[src] += 1
+            _LOGGER.debug(
+                "Replay drop from 0x%04X: IV %d seq %d, last %s (%d so far); a node that "
+                "restarts its seq after a power cycle shows up here",
+                src,
+                iv_index,
+                seq,
+                last,
+                self.replay_drops[src],
+            )
             return False
         self._replay[src] = (iv_index, seq)
         self._replay_dirty = True
@@ -214,8 +233,24 @@ class MeshNetwork:
         new_tx = self.tx_iv_index
         if new_tx > old_tx:  # a transmit IV index we have never used starts from seq 0
             self._reset_seq()
+            self._ceiling = SEQ_BLOCK  # one confirmed save covers the first sends
         self._persist()
         return BeaconOutcome.UPDATED
+
+    def accept_iv_jump(self, beacon: SecureBeacon) -> None:
+        """Adopt a verified beacon's IV index after the user confirmed a TOO_FAR jump.
+
+        Seq restarts from zero: the new transmit IV index has never been used by us. The
+        block is reserved here, so with an async store the caller awaits the save (and
+        ``mark_persisted``) before sending.
+        """
+        if beacon.iv_index <= self._iv_index:
+            raise ValueError(f"IV index {beacon.iv_index} is not ahead of ours ({self._iv_index})")
+        self._iv_index = beacon.iv_index
+        self._iv_update = beacon.iv_update
+        self._reset_seq()
+        self._ceiling = SEQ_BLOCK  # one confirmed save covers the first sends
+        self._persist()
 
 
 def _tx_iv_index(iv_index: int, iv_update: bool) -> int:

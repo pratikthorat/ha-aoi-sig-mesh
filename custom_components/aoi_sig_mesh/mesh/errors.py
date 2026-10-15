@@ -37,5 +37,9 @@ class ProvisioningError(MeshError):
     """Provisioning failed at a named step."""
 
     def __init__(self, step: str, message: str) -> None:
-        super().__init__(f"{step}: {message}")
+        super().__init__(step, message)  # both in args, so the error pickles
         self.step = step
+        self.message = message
+
+    def __str__(self) -> str:
+        return f"{self.step}: {self.message}"

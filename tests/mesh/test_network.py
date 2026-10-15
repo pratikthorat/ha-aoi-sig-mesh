@@ -291,7 +291,7 @@ def test_restart_after_iv_reset_resumes_safely():
     saved = []
     net = make(state={"iv_index": 1, "iv_update": True, "seq": 500}, saved=saved)
     assert net.apply_beacon(beacon(1)) is BeaconOutcome.UPDATED
-    assert saved[-1]["seq"] == 0
+    assert saved[-1]["seq"] == 64  # seq restarts at 0 with the first block reserved
     resaved = []
     restarted = make(state=saved[-1], saved=resaved)
     seq = restarted.next_seq()

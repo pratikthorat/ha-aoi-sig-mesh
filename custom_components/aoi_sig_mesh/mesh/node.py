@@ -126,6 +126,8 @@ def allocate_unicast(
     """Lowest start address in [low, high] with ``count`` free addresses after it."""
     if count < 1:
         raise ValueError("a node needs at least one element")
+    if not 0x0001 <= low <= high <= UNICAST_MAX:
+        raise ValueError(f"bad unicast range 0x{low:04X}-0x{high:04X}")
     candidate = low
     for start, size in sorted(used):
         if candidate + count - 1 < start:

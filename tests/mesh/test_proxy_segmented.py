@@ -59,6 +59,31 @@ def test_segmented_send_resends_lost_segments(monkeypatch):
     assert seqs == [1, 2]
 
 
+def test_a_resent_segment_other_than_segment_0_gets_a_fresh_seq(monkeypatch):
+    monkeypatch.setattr(proxy, "SEGMENT_ACK_TIMEOUT", 0.05)
+    sim, node = unconfigured_node()
+    deliver = sim._on_network
+    arrived = []
+
+    def lose_the_first_segment_1(payload):
+        arrived.append(payload)
+        if len(arrived) != 2:  # the second network PDU is segment 1's first send
+            deliver(payload)
+
+    monkeypatch.setattr(sim, "_on_network", lose_the_first_segment_1)
+
+    async def scenario():
+        _, _, link = make_link(sim)
+        await link.send(node.unicast, config_appkey_add(0, 0, APP_KEY), dev_key=node.dev_key)
+
+    run(scenario())
+    assert node.has_app_key
+    sent = [(parse_lower_access(pdu.transport_pdu).seg_o, pdu.seq) for pdu in sim.from_client]
+    # Segment 0 went out as SeqAuth 0, segment 1 as seq 1 and was lost. No ack came in time,
+    # so the next round resent both, each with a fresh seq: reusing 1 would be a replay.
+    assert sent == [(0, 0), (0, 2), (1, 3)]
+
+
 def test_segmented_send_times_out_without_acks(monkeypatch):
     monkeypatch.setattr(proxy, "SEGMENT_ACK_TIMEOUT", 0.02)
     sim, node = unconfigured_node()
