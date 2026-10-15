@@ -24,6 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 BACKOFF_MIN = 2.0
 BACKOFF_MAX = 60.0
 CONNECT_TIMEOUT = 60.0
+CLOSE_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,8 @@ class ConnectionManager:
         self._demand = asyncio.Event()
         self._tried: set[str] = set()
         self._skip_delay = False
+        self._connecting = False
+        self._reconnect_pending = False
         self._idle = False
         self._last_activity = 0.0
         self._task: asyncio.Task[None] | None = None
@@ -105,6 +108,8 @@ class ConnectionManager:
         return self._idle
 
     def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
         self._demand.set()  # connect once at start-up to read every node's state
         self._unsubscribe = self._radio.subscribe(self._on_advert)
         self._task = asyncio.get_running_loop().create_task(self._run(), name="aoi_sig_mesh link")
@@ -116,8 +121,12 @@ class ConnectionManager:
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                _LOGGER.exception("Mesh connection loop had failed")
 
     def matches(self, candidate: ProxyCandidate) -> bool:
         """Our Network ID in the advert, or the MAC of a node we know (Node Identity adverts)."""
@@ -157,6 +166,8 @@ class ConnectionManager:
     def reconnect(self) -> None:
         """Drop the current link (if any) and try again right away."""
         self._skip_delay = True
+        if self._connecting:
+            self._reconnect_pending = True  # the link being set up is dropped once it is up
         self._demand.set()
         self._closed.set()
         self._wake.set()
@@ -166,27 +177,49 @@ class ConnectionManager:
     async def _run(self) -> None:
         backoff = BACKOFF_MIN
         while True:
-            if self._idle_timeout > 0 and not self._demand.is_set():
-                self._idle = True
-                await self._demand.wait()
-            self._idle = False
-            link = candidate = None
+            try:
+                backoff = await self._cycle(backoff)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("Mesh connection loop failed; retrying")
+                await self._sleep(backoff)
+                backoff = min(backoff * 2, BACKOFF_MAX)
+
+    async def _cycle(self, backoff: float) -> float:
+        """One connect-and-serve round. Returns the backoff for the next round."""
+        loop = asyncio.get_running_loop()
+        if self._idle_timeout > 0 and not self._demand.is_set():
+            self._idle = True
+            await self._demand.wait()
+        self._idle = False
+        self._skip_delay = False
+        self._reconnect_pending = False
+        link = candidate = None
+        self._connecting = True
+        try:
             candidates = self.candidates()
             self._tried = {c.address for c in candidates}
             for candidate in candidates:
                 link = await self._try(candidate)
                 if link is not None:
                     break
-            if link is None or candidate is None:
-                await self._sleep(backoff)
-                backoff = min(backoff * 2, BACKOFF_MAX)
-                continue
-            backoff = BACKOFF_MIN
-            await self._serve(link, candidate)
-            if self._skip_delay:
-                self._skip_delay = False
-            elif not self._idle_timeout or self._demand.is_set():
-                await self._sleep(BACKOFF_MIN)
+        finally:
+            self._connecting = False
+        if link is None or candidate is None:
+            await self._sleep(backoff)
+            return min(backoff * 2, BACKOFF_MAX)
+        started = loop.time()
+        await self._serve(link, candidate)
+        if self._skip_delay:
+            self._skip_delay = False
+            return BACKOFF_MIN
+        if self._idle_timeout and not self._demand.is_set():
+            return BACKOFF_MIN
+        if loop.time() - started >= BACKOFF_MAX:
+            backoff = BACKOFF_MIN  # a link that held for a while is not flapping
+        await self._sleep(backoff)
+        return min(backoff * 2, BACKOFF_MAX)
 
     async def _sleep(self, delay: float) -> None:
         """Sleep, unless an advert from a new proxy (or reconnect/demand) wakes us."""
@@ -219,14 +252,14 @@ class ConnectionManager:
             async with asyncio.timeout(CONNECT_TIMEOUT):
                 await link.start(use_filter=self._use_filter)
         except asyncio.CancelledError:
-            await link.close()
+            await self._close_link(link)
             raise
         except Exception as err:
             _LOGGER.info("Mesh proxy %s setup failed: %s", candidate.address, err)
-            await link.close()
+            await self._close_link(link)
             return None
         if not link.is_connected:
-            await link.close()
+            await self._close_link(link)
             return None
         if self._use_filter and not link.filter_ok:
             _LOGGER.info("Mesh proxy %s ignored the filter; using accept-all", candidate.address)
@@ -236,6 +269,9 @@ class ConnectionManager:
         self._link, self._proxy = link, candidate
         self.touch()
         self._connected.set()
+        if self._reconnect_pending:
+            self._reconnect_pending = False
+            self._closed.set()
         _LOGGER.info("Connected to mesh proxy %s", candidate.address)
         try:
             try:
@@ -248,9 +284,30 @@ class ConnectionManager:
         finally:
             self._connected.clear()
             self._link = self._proxy = None
-            await link.close()  # also closes the bleak client after a remote drop
             _LOGGER.info("Disconnected from mesh proxy %s", candidate.address)
-            self._on_disconnected()
+            try:
+                self._on_disconnected()
+            except Exception:
+                _LOGGER.exception("Mesh disconnect handler failed")
+            await self._close_link(link)  # also closes the bleak client after a remote drop
+
+    async def _close_link(self, link: ProxyLink) -> None:
+        """Await link.close(), never raising its errors; finish it even if we are cancelled."""
+        task = asyncio.ensure_future(link.close())
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            await asyncio.wait({task}, timeout=CLOSE_TIMEOUT)
+        except asyncio.CancelledError as err:
+            cancelled = err
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({task}, timeout=CLOSE_TIMEOUT)
+        if not task.done():
+            task.cancel()
+            _LOGGER.warning("Closing the mesh link timed out")
+        elif not task.cancelled() and (error := task.exception()) is not None:
+            _LOGGER.debug("Closing the mesh link failed: %r", error)
+        if cancelled is not None:
+            raise cancelled
 
     async def _wait_closed_or_idle(self) -> None:
         closed = self._closed
