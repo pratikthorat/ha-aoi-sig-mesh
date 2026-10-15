@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
@@ -66,5 +66,5 @@ def _async_remove_stale_entities(hass: HomeAssistant, coordinator: MeshCoordinat
 
 async def _async_update_listener(hass: HomeAssistant, entry: AoiConfigEntry) -> None:
     """Reload for new or removed nodes, role or capability changes and new options."""
-    if entry.runtime_data.needs_reload():
+    if entry.state is ConfigEntryState.LOADED and entry.runtime_data.needs_reload():
         hass.config_entries.async_schedule_reload(entry.entry_id)

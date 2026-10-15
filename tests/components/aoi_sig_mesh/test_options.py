@@ -160,3 +160,113 @@ async def test_setting_a_node_up_reloads_when_its_capabilities_change(
     assert settled.connected
     assert not settled.needs_reload()
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_role_chosen_before_first_connect_survives_setup(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    """Setup refines the colour range of a CTL lamp; that must not undo the chosen role."""
+    lamp = sim.add_node("ctl", unicast=0x00B0, tuya_quirks=True, configured=False)
+    lamp.kelvin_min, lamp.kelvin_max = 3000, 5700
+    entry = make_entry(("Desk lamp", {**node_data(lamp), "configured": False}))
+    await setup_entry(hass, entry)  # no advert yet: not connected
+    subentry_id = next(iter(entry.subentries))
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_NODE),
+        context={"source": SOURCE_RECONFIGURE, "subentry_id": subentry_id},
+    )
+    await hass.config_entries.subentries.async_configure(result["flow_id"], {"role": "switch"})
+    await hass.async_block_till_done()
+
+    radio.advertise()
+    await until(lambda: entry.subentries[subentry_id].data["configured"] is True)
+    await until(lambda: entry.runtime_data.connected)
+    await hass.async_block_till_done()
+
+    record = entry.runtime_data.nodes[subentry_id]
+    assert (record.node.kelvin_min, record.node.kelvin_max) == (3000, 5700)
+    assert record.role == "switch"
+    assert entry.subentries[subentry_id].data["role"] == "switch"
+    assert hass.states.get("switch.desk_lamp") is not None
+    assert hass.states.get("light.desk_lamp") is None
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_setup_derives_the_role_when_composition_reveals_a_light(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    """Imported OnOff-only (a switch), but the node is a lamp: the role follows."""
+    lamp = sim.add_node("ctl", unicast=0x00B0, tuya_quirks=True, configured=False)
+    radio.advertise()
+    data = {**node_data(lamp, configured=False), "role": "switch"}
+    entry = make_entry(("Desk lamp", data))
+    await setup_entry(hass, entry)
+    sid = next(iter(entry.subentries))
+
+    await until(lambda: entry.subentries[sid].data["role"] == "light")
+    await until(lambda: entry.runtime_data.connected and hass.states.get("light.desk_lamp"))
+
+    assert entry.runtime_data.nodes[sid].role == "light"
+    assert hass.states.get("switch.desk_lamp") is None
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_setup_updates_the_device_info_without_a_reload(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    lamp = sim.add_node("ctl", unicast=0x00B0, tuya_quirks=True, configured=False)
+    radio.advertise()
+    data = {**node_data(lamp), "configured": False, "cid": None, "pid": None, "vid": None}
+    entry = make_entry(("Desk lamp", data))
+    coordinator = await setup_entry(hass, entry)
+    sid = next(iter(entry.subentries))
+    identifier = (DOMAIN, f"{NETWORK_ID}_00b0")
+    device = dr.async_get(hass).async_get_device(identifiers={identifier})
+    assert device is not None and device.manufacturer is None
+
+    await until(lambda: entry.subentries[sid].data["configured"] is True)
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data is coordinator  # nothing reloaded
+    device = dr.async_get(hass).async_get_device(identifiers={identifier})
+    assert device.manufacturer == "Tuya"
+    assert device.model is not None
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_refining_only_the_element_count_does_not_reload(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    lamp = sim.add_node("ctl", unicast=0x00B0, tuya_quirks=True, configured=False)
+    radio.advertise()
+    data = {**node_data(lamp), "configured": False, "element_count": 1}
+    entry = make_entry(("Desk lamp", data))
+    coordinator = await setup_entry(hass, entry)
+    sid = next(iter(entry.subentries))
+
+    await until(lambda: entry.subentries[sid].data["configured"] is True)
+    await hass.async_block_till_done()
+
+    assert entry.subentries[sid].data["element_count"] == 2
+    assert entry.runtime_data is coordinator
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_damaged_sibling_does_not_cause_a_reload(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    lamp = sim.add_node("ctl", unicast=0x00B0, tuya_quirks=True, configured=False)
+    radio.advertise()
+    entry = make_entry(
+        ("Desk lamp", {**node_data(lamp), "configured": False}),
+        ("Hall plug", {"unicast": 0x00C0, "element_count": 1}),  # no DevKey: damaged
+    )
+    coordinator = await setup_entry(hass, entry)
+    sid = next(iter(entry.subentries))
+
+    await until(lambda: entry.subentries[sid].data["configured"] is True)
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data is coordinator
+    assert not coordinator.needs_reload()
+    await hass.config_entries.async_unload(entry.entry_id)

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.util import dt as dt_util
@@ -661,17 +662,35 @@ class MeshCoordinator:
             node.kelvin_min,
             node.kelvin_max,
         )
+        was_light = record.node.is_light
         record.node = node
         record.configured = True
         record.quirks = quirks_for(node.cid, node.pid)
+        subentry = self.entry.subentries[record.subentry_id]
+        data = {**subentry.data, **node.to_dict(), CONF_CONFIGURED: True}
         if capabilities(node) != before:
             _LOGGER.info("%s: Composition changed its capabilities", record.title)
+        if node.is_light != was_light:
+            # only a change of what the node is re-derives the role; a chosen one stays
             record.role = default_role(node)
-        subentry = self.entry.subentries[record.subentry_id]
-        self.hass.config_entries.async_update_subentry(
-            self.entry,
-            subentry,
-            data={**subentry.data, **node.to_dict(), CONF_CONFIGURED: True, CONF_ROLE: record.role},
+            data[CONF_ROLE] = record.role
+        self.hass.config_entries.async_update_subentry(self.entry, subentry, data=data)
+        self._update_device_info(record)
+
+    def _update_device_info(self, record: NodeRecord) -> None:
+        """Composition supplies manufacturer, model and version without a reload."""
+        registry = dr.async_get(self.hass)
+        identifier = (DOMAIN, f"{self.network_id}_{record.node.unicast:04x}")
+        if (device := registry.async_get_device(identifiers={identifier})) is None:
+            return
+        from .entity import node_device_info  # entity imports this module
+
+        info = node_device_info(self, record)
+        registry.async_update_device(
+            device.id,
+            manufacturer=info.get("manufacturer"),
+            model=info.get("model"),
+            sw_version=info.get("sw_version"),
         )
 
     async def _async_refresh_all(self, link: ProxyLink) -> None:
