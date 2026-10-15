@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import patch
 
@@ -11,8 +12,11 @@ from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.aoi_sig_mesh import coordinator as coordinator_module
 from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
+from custom_components.aoi_sig_mesh.mesh import network as network_module
 from custom_components.aoi_sig_mesh.mesh.control import NodeCommands
-from custom_components.aoi_sig_mesh.mesh.errors import SeqNotSaved
+from custom_components.aoi_sig_mesh.mesh.errors import LinkClosedError, MeshTimeout, SeqNotSaved
+from custom_components.aoi_sig_mesh.mesh.models import OP_CTL_STATUS, OP_LIGHTNESS_STATUS
+from custom_components.aoi_sig_mesh.mesh.proxy import ProxyLink
 from custom_components.aoi_sig_mesh.store import NetworkStore
 from tests.sim.mesh_sim import SimMesh, SimNode
 from tests.sim.sim_radio import SimRadio
@@ -110,8 +114,14 @@ async def test_restart_never_reuses_seq(
     bulb: SimNode,
     radio: SimRadio,
     hass_storage: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A crash after the last seq ceiling was queued: no seq is ever sent twice."""
+    """A crash after the last seq ceiling was queued: no seq is ever sent twice.
+
+    Small seq blocks, so the ten commands cross several and the lost shutdown write matters.
+    """
+    monkeypatch.setattr(network_module, "SEQ_BLOCK", 8)
+    monkeypatch.setattr(network_module, "RESERVE_MARGIN", 4)
     radio.advertise()
     entry = make_entry(("Desk lamp", node_data(bulb)))
     coordinator = await setup_entry(hass, entry)
@@ -202,3 +212,171 @@ async def test_reconnect_opens_a_new_connection(
     coordinator.async_reconnect()
 
     await until(lambda: len(radio.transports) == 2 and coordinator.connected)
+
+
+async def test_a_late_failure_never_overwrites_a_newer_confirmed_status(
+    hass: HomeAssistant, bulb: SimNode, bulb_entry: Any
+) -> None:
+    """A reaches the bulb but its ack is lost; B (50 %) succeeds; then A times out."""
+    coordinator, sid = lamp(bulb_entry)
+    await coordinator.async_turn_off(sid)
+    real_turn_on = NodeCommands.turn_on
+    gate = asyncio.Event()
+
+    async def ack_lost(self: NodeCommands, **kwargs: Any) -> None:
+        if kwargs.get("lightness") is None:
+            await real_turn_on(self, **kwargs)  # the bulb applies it
+            await gate.wait()
+            raise MeshTimeout("ack lost")
+        await real_turn_on(self, **kwargs)
+
+    with patch.object(NodeCommands, "turn_on", ack_lost):
+        first = hass.async_create_task(coordinator.async_turn_on(sid))
+        await until(lambda: bulb.on)
+        await coordinator.async_turn_on(sid, lightness=0x8000)
+        gate.set()
+        with pytest.raises(HomeAssistantError):
+            await first
+
+    state = coordinator.nodes[sid].state
+    assert (bulb.on, bulb.lightness) == (True, 0x8000)
+    assert (state.on, state.lightness) == (True, 0x8000)
+
+
+async def test_a_set_that_times_out_after_its_onoff_was_confirmed_keeps_the_confirmed_state(
+    hass: HomeAssistant, bulb: SimNode, bulb_entry: Any
+) -> None:
+    """Tuya: OnOff ON is acknowledged, then the Lightness Set goes unanswered."""
+    coordinator, sid = lamp(bulb_entry)
+    await coordinator.async_turn_off(sid)
+    record = coordinator.nodes[sid]
+    real_request = ProxyLink.request
+
+    async def level_lost(
+        self: ProxyLink, dst: int, access: bytes, response_opcode: int, **kwargs: Any
+    ) -> Any:
+        if response_opcode in (OP_LIGHTNESS_STATUS, OP_CTL_STATUS):
+            raise MeshTimeout("no answer")
+        return await real_request(self, dst, access, response_opcode, **kwargs)
+
+    with (
+        patch.object(ProxyLink, "request", level_lost),
+        pytest.raises(HomeAssistantError) as err,
+    ):
+        await coordinator.async_turn_on(sid, lightness=0x8000)
+
+    assert err.value.translation_key == "command_failed"
+    assert bulb.on is True
+    assert record.state.on is True  # the OnOff Status said so: not reverted to off
+    assert record.state == record.confirmed  # the unconfirmed 50 % is dropped
+    assert record.state.lightness != 0x8000
+    assert record.failures == 1
+
+
+async def test_a_pending_command_does_not_make_the_next_one_skip_onoff_before_set(
+    hass: HomeAssistant, bulb: SimNode, bulb_entry: Any
+) -> None:
+    """A plain turn-on is still waiting; a 50 % turn-on must still send OnOff ON first."""
+    coordinator, sid = lamp(bulb_entry)
+    await coordinator.async_turn_off(sid)
+    real_turn_on = NodeCommands.turn_on
+    gate = asyncio.Event()
+
+    async def plain_waits(self: NodeCommands, **kwargs: Any) -> None:
+        if kwargs.get("lightness") is None:
+            await gate.wait()
+        await real_turn_on(self, **kwargs)
+
+    with patch.object(NodeCommands, "turn_on", plain_waits):
+        first = hass.async_create_task(coordinator.async_turn_on(sid))
+        await until(lambda: coordinator.nodes[sid].state.on is True)
+        await coordinator.async_turn_on(sid, lightness=0x8000)
+        assert (bulb.on, bulb.lightness) == (True, 0x8000)
+        gate.set()
+        await first
+
+
+async def test_a_cancelled_command_reverts(hass: HomeAssistant, bulb_entry: Any) -> None:
+    coordinator, sid = lamp(bulb_entry)
+    started = asyncio.Event()
+
+    async def hangs(self: NodeCommands, **kwargs: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch.object(NodeCommands, "turn_on", hangs):
+        command = hass.async_create_task(coordinator.async_turn_on(sid))
+        await until(started.is_set)
+        assert coordinator.nodes[sid].state.on is True
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+
+    assert coordinator.nodes[sid].state.on is False
+
+
+async def test_a_link_lost_mid_command_raises_not_connected(
+    hass: HomeAssistant, bulb_entry: Any
+) -> None:
+    coordinator, sid = lamp(bulb_entry)
+
+    async def dropped(self: NodeCommands, **kwargs: Any) -> None:
+        raise LinkClosedError("proxy link closed")
+
+    with (
+        patch.object(NodeCommands, "turn_on", dropped),
+        pytest.raises(HomeAssistantError) as err,
+    ):
+        await coordinator.async_turn_on(sid)
+
+    assert err.value.translation_key == "not_connected"
+    assert coordinator.nodes[sid].state.on is False
+    assert coordinator.nodes[sid].failures == 0
+
+
+async def test_a_command_waiting_for_a_link_fails_at_once_when_the_entry_unloads(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(coordinator_module, "COMMAND_CONNECT_TIMEOUT", 30.0)
+    coordinator, sid = lamp(bulb_entry)
+    radio.forget()
+    radio.transports[-1].drop()
+    await until(lambda: not coordinator.connected)
+    command = hass.async_create_task(coordinator.async_turn_on(sid))
+    await until(lambda: coordinator.nodes[sid].state.on is True)
+
+    await hass.config_entries.async_unload(bulb_entry.entry_id)
+
+    with pytest.raises(HomeAssistantError) as err:
+        async with asyncio.timeout(1.0):
+            await command
+    assert err.value.translation_key == "not_connected"
+    assert coordinator.nodes[sid].state.on is False
+    with pytest.raises(HomeAssistantError) as err:
+        await coordinator.async_turn_on(sid)  # after unload: refused without waiting
+    assert err.value.translation_key == "not_connected"
+
+
+async def test_a_save_that_never_finishes_raises_seq_not_saved(
+    hass: HomeAssistant, bulb_entry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(coordinator_module, "SAVE_WAIT", 0.3)
+    coordinator, sid = lamp(bulb_entry)
+    stuck = asyncio.Event()
+
+    async def hung(self: NetworkStore, state: dict[str, Any]) -> None:
+        await stuck.wait()
+
+    network = coordinator.network
+    network._seq = network._ceiling  # the saved block is used up: the next send needs a new one
+    with patch.object(NetworkStore, "async_save", hung):
+        try:
+            with pytest.raises(HomeAssistantError) as err:
+                await coordinator.async_turn_on(sid)
+        finally:
+            stuck.set()  # let the write finish, so the unload's final save is not stuck
+            await coordinator._saver.async_flush()
+
+    assert err.value.translation_key == "seq_not_saved"
+    assert coordinator.nodes[sid].state.on is False
+    assert coordinator.nodes[sid].failures == 0

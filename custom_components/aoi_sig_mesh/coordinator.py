@@ -67,6 +67,7 @@ NO_PROXY_ISSUE_AFTER = 600.0  # seconds without a link before the repair issue
 FAILURES_UNAVAILABLE = 3  # unanswered requests in a row
 REFRESH_STAGGER = 0.3  # seconds between nodes when reading every node's state
 COMMAND_CONNECT_TIMEOUT = 15.0
+SAVE_WAIT = 10.0  # seconds a command waits for its seq block's save before giving up
 CONFIGURE_TIMEOUT = 90.0
 FOLLOW_UP_MARGIN = 0.5  # seconds after a transition ends before reading the final state
 
@@ -136,7 +137,10 @@ class NodeRecord:
     mac: str | None
     configured: bool
     quirks: Quirk
-    state: NodeState = field(default_factory=NodeState)
+    state: NodeState = field(default_factory=NodeState)  # confirmed plus optimistic
+    confirmed: NodeState = field(default_factory=NodeState)  # only what statuses said
+    generation: int = 0  # bumped by every status applied and every command started
+    command_generation: int = 0  # the generation the newest command took
     available: bool = True
     failures: int = 0
     last_seen: datetime | None = None
@@ -161,6 +165,7 @@ class MeshCoordinator:
         self._save_retry: CALLBACK_TYPE | None = None
         self._save_backoff = SAVE_RETRY_MIN
         self._stopping = False
+        self._stopped = asyncio.Event()  # set with _stopping: commands stop waiting for a link
         self._shutdown: asyncio.Task[None] | None = None
         self._save_failed = False  # a save failed since the last one that landed
         self._refreshing = 0  # running _async_refresh_all passes
@@ -392,6 +397,7 @@ class MeshCoordinator:
         """
         if self._shutdown is None:
             self._stopping = True
+            self._stopped.set()
             self._shutdown = self.hass.async_create_task(
                 self._async_stop(), "aoi_sig_mesh shutdown"
             )
@@ -536,6 +542,9 @@ class MeshCoordinator:
         record.failures = 0
         record.available = True
         update = apply_status(record.state, message)
+        if update is not None:
+            apply_status(record.confirmed, message)
+            record.generation += 1  # a failed command no longer reverts over this
         self._notify(record.subentry_id)
         if update is not None and update.remaining_ms:
             self._schedule_follow_up(record, update.remaining_ms / 1000 + FOLLOW_UP_MARGIN)
@@ -708,53 +717,97 @@ class MeshCoordinator:
     async def _async_command(
         self,
         record: NodeRecord,
-        before: NodeState,
         action: Callable[[NodeCommands], Awaitable[None]],
+        before: NodeState | None = None,
+        generation: int = 0,
     ) -> None:
-        """Run ``action``; on failure restore ``before`` and raise a translated error."""
+        """Run ``action``; on failure revert to ``before`` and raise a translated error.
+
+        ``before`` and ``generation`` come from ``_begin``; without them nothing is reverted.
+        """
         try:
-            link = await self.manager.get_link(COMMAND_CONNECT_TIMEOUT)
-        except MeshTimeout as err:  # no proxy came up within the wait
-            self._revert(record, before)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="not_connected",
-                translation_placeholders={"name": record.title},
-            ) from err
-        commands = NodeCommands(link, record.node, record.quirks, self._tids)
-        try:
+            if (link := await self._async_command_link()) is None:
+                raise LinkClosedError("no mesh proxy connection")
+            commands = NodeCommands(link, record.node, record.quirks, self._tids)
             try:
                 await action(commands)
             except SeqNotSaved:  # the seq block's save is pending (or failed): save, retry once
-                await self._async_save_state()
+                try:
+                    async with asyncio.timeout(SAVE_WAIT):
+                        await self._async_save_state()
+                except TimeoutError as err:
+                    raise SeqNotSaved("the mesh state save did not finish in time") from err
                 await action(commands)
         except SeqNotSaved as err:  # the save still is not on disk
-            self._revert(record, before)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="seq_not_saved",
-                translation_placeholders={"name": record.title},
-            ) from err
+            self._revert(record, before, generation)
+            raise self._error(record, "seq_not_saved") from err
         except MeshTimeout as err:  # before MeshError: an unanswered command counts as a miss
-            self._revert(record, before)
+            self._revert(record, before, generation)
             self._failed(record)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="command_failed",
-                translation_placeholders={"name": record.title},
-            ) from err
-        except MeshError as err:  # the link dropped, or the TIDs ran out
-            self._revert(record, before)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="command_failed",
-                translation_placeholders={"name": record.title},
-            ) from err
+            raise self._error(record, "command_failed") from err
+        except LinkClosedError as err:  # no link, or it dropped: not the node's fault
+            self._revert(record, before, generation)
+            raise self._error(record, "not_connected") from err
+        except MeshError as err:  # e.g. the TIDs ran out
+            self._revert(record, before, generation)
+            raise self._error(record, "command_failed") from err
+        except BaseException:  # cancelled
+            self._revert(record, before, generation)
+            raise
         self.manager.touch()
 
+    async def _async_command_link(self) -> ProxyLink | None:
+        """The link, waiting for a connect; None if none comes up in time or we are stopping."""
+        if self._stopping:
+            return None
+        if (link := self.manager.link) is not None:
+            self.manager.touch()
+            return link
+        getting = asyncio.create_task(self.manager.get_link(COMMAND_CONNECT_TIMEOUT))
+        stopping = asyncio.create_task(self._stopped.wait())
+        try:
+            await asyncio.wait((getting, stopping), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopping.cancel()
+            getting.cancel()  # no effect once it is done
+        if not getting.done() or getting.cancelled():
+            return None
+        try:
+            return getting.result()
+        except MeshTimeout:
+            return None
+
+    def _error(self, record: NodeRecord, key: str) -> HomeAssistantError:
+        return HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key=key,
+            translation_placeholders={"name": record.title},
+        )
+
     @callback
-    def _revert(self, record: NodeRecord, before: NodeState) -> None:
-        record.state = before
+    def _begin(self, record: NodeRecord) -> int:
+        """A command starts (after its optimistic state): returns its generation."""
+        record.generation += 1
+        record.command_generation = record.generation
+        self._notify(record.subentry_id)
+        return record.generation
+
+    @callback
+    def _revert(self, record: NodeRecord, before: NodeState | None, generation: int) -> None:
+        """Undo a failed command's optimistic state, but never over anything newer.
+
+        Nothing happened since the command started: restore ``before``. Only statuses came
+        in since: they are the truth, so drop the optimistic fields still on top of them. A
+        newer command started: its optimistic state stays.
+        """
+        if before is None:
+            return
+        if record.generation == generation:
+            record.state = before
+        elif record.command_generation == generation:
+            record.state = replace(record.confirmed)
+        else:
+            return
         self._notify(record.subentry_id)
 
     async def async_turn_on(
@@ -766,41 +819,46 @@ class MeshCoordinator:
         transition_ms: int | None = None,
     ) -> None:
         record = self.nodes[subentry_id]
+        if record.role == ROLE_SWITCH:  # a switch sends Generic OnOff only
+            lightness = kelvin = None
         before = replace(record.state)
-        currently_on = bool(record.state.on)
+        currently_on = bool(record.confirmed.on)  # a pending command's optimism is no proof
         record.state.on = True
         if lightness is not None:
             record.state.lightness = lightness
         if kelvin is not None and record.node.is_tunable:
             record.state.kelvin = max(record.node.kelvin_min, min(record.node.kelvin_max, kelvin))
-        self._notify(subentry_id)
+        generation = self._begin(record)
         await self._async_command(
             record,
-            before,
             lambda commands: commands.turn_on(
                 currently_on=currently_on,
                 lightness=lightness,
                 kelvin=kelvin,
                 transition_ms=transition_ms,
             ),
+            before,
+            generation,
         )
 
     async def async_turn_off(self, subentry_id: str, *, transition_ms: int | None = None) -> None:
         record = self.nodes[subentry_id]
+        onoff_only = record.role == ROLE_SWITCH
         before = replace(record.state)
         record.state.on = False
-        self._notify(subentry_id)
+        generation = self._begin(record)
         await self._async_command(
-            record, before, lambda commands: commands.turn_off(transition_ms=transition_ms)
+            record,
+            lambda commands: commands.turn_off(transition_ms=transition_ms, onoff_only=onoff_only),
+            before,
+            generation,
         )
 
     async def async_identify(self, subentry_id: str) -> None:
         record = self.nodes[subentry_id]
-        currently_on = bool(record.state.on)
+        currently_on = bool(record.confirmed.on)  # the blinks end where the node really is
         await self._async_command(
-            record,
-            replace(record.state),
-            lambda commands: commands.identify(currently_on=currently_on),
+            record, lambda commands: commands.identify(currently_on=currently_on)
         )
 
     @callback

@@ -182,8 +182,13 @@ class NodeCommands:
             access = ctl_temperature_set(kelvin, tid, transition_ms=transition_ms)
             await self._link.request(address, access, OP_CTL_TEMP_STATUS)
 
-    async def turn_off(self, *, transition_ms: int | None = None) -> None:
-        if Quirk.OFF_VIA_ONOFF in self._quirks or ROLE_LIGHTNESS not in self._node.models:
+    async def turn_off(self, *, transition_ms: int | None = None, onoff_only: bool = False) -> None:
+        """Lightness 0 where the node has Lightness; ``onoff_only`` (a switch) forces OnOff."""
+        if (
+            onoff_only
+            or Quirk.OFF_VIA_ONOFF in self._quirks
+            or ROLE_LIGHTNESS not in self._node.models
+        ):
             await self._onoff(False, transition_ms)
             return
         address = self._node.models[ROLE_LIGHTNESS]

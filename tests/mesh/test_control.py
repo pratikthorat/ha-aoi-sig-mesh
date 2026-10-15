@@ -210,6 +210,21 @@ def test_brightness_and_temperature_together_use_one_ctl_set():
     run(scenario())
 
 
+def test_onoff_only_turns_a_dimmable_light_off_with_generic_onoff():
+    async def scenario():
+        sim = SimMesh()
+        lamp = sim.add_node("lightness")
+        lamp.on = True
+        link, state = await open_link(sim)
+        commands = NodeCommands(link, node_for(lamp), Quirk.NONE, TidCounter())
+        await commands.turn_off(onoff_only=True)
+        assert sets(lamp) == [(0x00B0, OP_ONOFF_SET)]
+        assert lamp.on is False
+        assert state.on is False
+
+    run(scenario())
+
+
 def test_plug_only_ever_gets_onoff():
     async def scenario():
         sim = SimMesh()
