@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import logging
 
 import pytest
 
@@ -365,3 +366,65 @@ def test_parse_proxy_service_data():
     assert parse_proxy_service_data(b"") is None
     assert parse_proxy_service_data(b"\x00" + network_id[:7]) is None
     assert parse_proxy_service_data(b"\x02" + network_id) is None
+    assert parse_proxy_service_data(b"\x01" + identity[:15]) is None
+    assert parse_proxy_service_data(b"\x01" + identity + b"\x00") is None
+
+
+def test_too_far_beacon_warns_once_per_iv_index(caplog):
+    sim = SimMesh()
+    outcomes = []
+
+    async def scenario():
+        make_link(sim, on_beacon=lambda beacon, outcome: outcomes.append(outcome))
+        for iv_index in (5, 5, 5, 6):
+            sim.send_beacon(iv_index=iv_index)
+            await asyncio.sleep(0.01)
+
+    with caplog.at_level(logging.DEBUG, logger="mesh.proxy"):
+        run(scenario())
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert "IV index 5" in warnings[0] and "IV index 6" in warnings[1]
+    assert outcomes == [BeaconOutcome.TOO_FAR] * 4
+
+
+def test_beacon_that_cannot_be_saved_is_logged_and_the_link_stays_up(caplog):
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+    outcomes = []
+
+    def failing_apply_beacon(beacon):
+        raise OSError("disk full")
+
+    async def scenario():
+        network, _, link = make_link(
+            sim, on_beacon=lambda beacon, outcome: outcomes.append(outcome)
+        )
+        network.apply_beacon = failing_apply_beacon
+        sim.send_beacon(iv_index=1)
+        await asyncio.sleep(0.01)
+        reply = await link.request(node.unicast, onoff_get(), OP_ONOFF_STATUS)
+        return link.is_connected, reply.params
+
+    assert run(scenario()) == (True, b"\x00")
+    assert "Could not save the IV index from a beacon" in caplog.text
+    assert outcomes == []
+
+
+def test_failing_on_beacon_callback_leaves_the_link_up(caplog):
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    def broken_callback(beacon, outcome):
+        raise RuntimeError("callback bug")
+
+    async def scenario():
+        network, _, link = make_link(sim, on_beacon=broken_callback)
+        sim.iv_index = 1
+        sim.send_beacon()
+        await asyncio.sleep(0.01)
+        reply = await link.request(node.unicast, onoff_get(), OP_ONOFF_STATUS)
+        return link.is_connected, network.iv_index, reply.params
+
+    assert run(scenario()) == (True, 1, b"\x00")
+    assert "on_beacon callback failed" in caplog.text

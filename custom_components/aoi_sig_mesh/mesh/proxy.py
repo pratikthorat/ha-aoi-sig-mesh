@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -52,6 +52,7 @@ REQUEST_ATTEMPTS = 3
 FILTER_TIMEOUT = 2.0
 SEGMENT_ACK_TIMEOUT = 1.0
 SEGMENT_RETRANSMITS = 2
+SEGMENT_GROUP_INTERVAL = 0.1  # between the repeats of a segmented group send
 
 GROUP_ADDRESS_MIN = 0xC000  # group addresses, including all-nodes 0xFFFF
 
@@ -128,6 +129,7 @@ class ProxyLink:
         self._write_lock = asyncio.Lock()
         self._segment_lock = asyncio.Lock()
         self._outgoing: _Outgoing | None = None
+        self._too_far_warned: int | None = None  # the last too-far beacon IV index warned about
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
         self.filter_ok = False
@@ -202,6 +204,8 @@ class ProxyLink:
         self._waiters.setdefault(key, []).append(future)
         try:
             for _ in range(attempts):
+                # A segmented send that times out (MeshTimeout) is deliberately not retried
+                # here: send() already retransmits each segment 1 + SEGMENT_RETRANSMITS times.
                 await self.send(dst, access, dev_key=dev_key)
                 try:
                     return await asyncio.wait_for(asyncio.shield(future), timeout)
@@ -246,7 +250,10 @@ class ProxyLink:
     async def _send_segmented(
         self, dst: int, access: bytes, *, akf: int, key: bytes, aid: int
     ) -> None:
-        """Send a segmented access message and wait until every segment is acked."""
+        """Send a segmented access message and wait until every segment is acked.
+
+        Group destinations never ack: their segments are repeated instead.
+        """
         network = self._network
         async with self._segment_lock:  # one segmented message in flight at a time
             seq_auth = network.next_seq()
@@ -263,35 +270,69 @@ class ProxyLink:
             )
             seq_zero = seq_auth & SEQ_ZERO_MASK
             segments = segmented_access(upper, akf=akf, aid=aid, szmic=0, seq_zero=seq_zero)
+            seqs = self._segment_seqs(seq_auth, iv_index)
+            if dst >= GROUP_ADDRESS_MIN:
+                for repeat in range(1 + SEGMENT_RETRANSMITS):
+                    if repeat:
+                        await asyncio.sleep(SEGMENT_GROUP_INTERVAL)
+                    for segment in segments:
+                        await self._send_network(dst, segment, seq=next(seqs), iv_index=iv_index)
+                return
             complete = (1 << len(segments)) - 1
             outgoing = self._outgoing = _Outgoing(dst, seq_zero)
             try:
-                for round_index in range(1 + SEGMENT_RETRANSMITS):
-                    outgoing.event.clear()
+                idle_rounds = 0  # rounds in a row without a newly acked segment
+                while True:
+                    acked_before = outgoing.acked & complete
                     for seg_o, segment in enumerate(segments):
-                        if outgoing.acked >> seg_o & 1:
-                            continue
-                        # Only the first send of segment 0 carries SeqAuth; every other
-                        # send (other segments, retransmits) takes a new seq.
-                        if round_index == 0 and seg_o == 0:
-                            seq = seq_auth
-                        else:
-                            self._check_tx_iv_index(iv_index)
-                            seq = network.next_seq()
-                        await self._send_network(dst, segment, seq=seq, iv_index=iv_index)
-                    try:
-                        await asyncio.wait_for(outgoing.event.wait(), SEGMENT_ACK_TIMEOUT)
-                    except TimeoutError:
-                        continue
+                        if not outgoing.acked >> seg_o & 1:
+                            await self._send_network(
+                                dst, segment, seq=next(seqs), iv_index=iv_index
+                            )
+                    await self._wait_for_ack_progress(outgoing, acked_before, complete)
                     if self._closed:
                         raise LinkClosedError("proxy link closed")
                     if outgoing.rejected:
                         raise MeshError(f"0x{dst:04X} rejected the segmented message")
                     if outgoing.acked & complete == complete:
                         return
-                raise MeshTimeout(f"0x{dst:04X} did not ack all {len(segments)} segments")
+                    if outgoing.acked & complete != acked_before:
+                        idle_rounds = 0  # it is moving: the round budget starts again
+                    else:
+                        idle_rounds += 1
+                        if idle_rounds >= 1 + SEGMENT_RETRANSMITS:
+                            raise MeshTimeout(
+                                f"0x{dst:04X} did not ack all {len(segments)} segments"
+                            )
             finally:
                 self._outgoing = None
+
+    async def _wait_for_ack_progress(
+        self, outgoing: _Outgoing, acked_before: int, complete: int
+    ) -> None:
+        """Wait up to SEGMENT_ACK_TIMEOUT for an ack that acks a new segment.
+
+        A repeated ack that adds nothing does not end the wait. A reject or a closed link does.
+        """
+
+        def settled() -> bool:
+            return self._closed or outgoing.rejected or outgoing.acked & complete != acked_before
+
+        try:
+            async with asyncio.timeout(SEGMENT_ACK_TIMEOUT):
+                while not settled():
+                    outgoing.event.clear()
+                    await outgoing.event.wait()
+        except TimeoutError:
+            pass
+
+    def _segment_seqs(self, seq_auth: int, iv_index: int) -> Iterator[int]:
+        """The seq of each segment send: SeqAuth for the first send of segment 0, then a new
+        seq for every other send (other segments, retransmits) under the same IV index."""
+        yield seq_auth
+        while True:
+            self._check_tx_iv_index(iv_index)  # right before taking each seq
+            yield self._network.next_seq()
 
     def _check_tx_iv_index(self, iv_index: int) -> None:
         """Abort a segmented send once the transmit IV index has moved on under it.
@@ -451,7 +492,10 @@ class ProxyLink:
             _LOGGER.exception("Could not save the IV index from a beacon")
             return
         if outcome is BeaconOutcome.TOO_FAR:
-            _LOGGER.warning(
+            # Proxies repeat their beacon every few seconds: warn once per IV index.
+            log = _LOGGER.debug if beacon.iv_index == self._too_far_warned else _LOGGER.warning
+            self._too_far_warned = beacon.iv_index
+            log(
                 "Ignoring a beacon with IV index %d: we are at %d and accept one step at a time",
                 beacon.iv_index,
                 self._network.iv_index,

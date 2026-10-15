@@ -1,12 +1,25 @@
 import asyncio
+import itertools
 
 import pytest
 
 from mesh import proxy
 from mesh.config import OP_APPKEY_STATUS, STATUS_SUCCESS, config_appkey_add
 from mesh.errors import LinkClosedError, MeshError, MeshTimeout
+from mesh.pdu import (
+    PDU_NETWORK,
+    NetworkKeys,
+    ProxyReassembler,
+    decrypt_network_pdu,
+    encrypt_network_pdu,
+    proxy_pdus,
+)
+from mesh.transport import make_segment_ack, parse_lower_access
 from tests.mesh.test_proxy import make_link
-from tests.sim.mesh_sim import APP_KEY, SimMesh, run
+from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, SimMesh, run
+
+NODE = 0x00B0
+SIX_SEGMENTS = bytes(range(60))  # a 60-byte access message + 4-byte TransMIC = 6 segments
 
 
 def unconfigured_node():
@@ -85,8 +98,9 @@ def test_link_drop_during_segmented_send_raises_promptly():
         transport.drop()
         with pytest.raises(LinkClosedError):
             await asyncio.wait_for(sending, 0.2)  # well under SEGMENT_ACK_TIMEOUT (1 s)
+        return link
 
-    run(scenario())
+    assert run(scenario())._outgoing is None
 
 
 def record_network_pdus(monkeypatch):
@@ -128,3 +142,121 @@ def test_iv_update_completing_mid_send_never_reuses_a_seq(monkeypatch):
     assert len(sent) == len(set(sent)), sent  # no (IV index, seq) pair is used twice
     assert not isinstance(error, MeshTimeout)
     assert link._outgoing is None
+
+
+class AckingProxy:
+    """A stub GATT link whose node answers each segment it receives with ``respond``.
+
+    ``respond(seg_o, seq_zero, acked)`` returns the (src, seq_zero, block_ack) Segment Acks
+    to send back; ``acked`` is the node's own record, which ``respond`` may update.
+    """
+
+    max_write = 100  # one proxy PDU per network PDU
+
+    def __init__(self, respond):
+        self.is_connected = True
+        self.segments: list[int] = []  # seg_o of every segment the client wrote
+        self.acked: set[int] = set()
+        self._respond = respond
+        self._keys = NetworkKeys.from_net_key(NET_KEY)
+        self._proxy_rx = ProxyReassembler()
+        self._seq = itertools.count()
+        self._notify = None
+
+    def set_notify_callback(self, callback):
+        self._notify = callback
+
+    def set_disconnect_callback(self, callback):
+        pass
+
+    async def write(self, data):
+        pdu_type, payload = self._proxy_rx.feed(data)
+        net = decrypt_network_pdu(self._keys, payload, 0)
+        if pdu_type != PDU_NETWORK or net is None or net.ctl:
+            return
+        lower = parse_lower_access(net.transport_pdu)
+        self.segments.append(lower.seg_o)
+        for src, seq_zero, block_ack in self._respond(lower.seg_o, lower.seq_zero, self.acked):
+            ack = encrypt_network_pdu(
+                self._keys,
+                ctl=1,
+                ttl=4,
+                seq=next(self._seq),
+                src=src,
+                dst=CLIENT,
+                transport_pdu=make_segment_ack(seq_zero, block_ack),
+                iv_index=0,
+            )
+            for part in proxy_pdus(PDU_NETWORK, ack, self.max_write):
+                asyncio.get_running_loop().call_soon(self._notify, part)
+
+    async def close(self):
+        self.is_connected = False
+
+
+def block(acked):
+    return sum(1 << seg_o for seg_o in acked)
+
+
+def send_through(stub):
+    async def scenario():
+        _, _, link = make_link(SimMesh(), stub)
+        await link.send(NODE, SIX_SEGMENTS)
+
+    run(scenario())
+
+
+def test_a_send_that_keeps_making_progress_completes(monkeypatch):
+    monkeypatch.setattr(proxy, "SEGMENT_ACK_TIMEOUT", 0.05)
+
+    def one_new_segment_per_round(seg_o, seq_zero, acked):
+        if seg_o != max(set(range(6)) - acked):
+            return []  # only the highest missing segment, the round's last, gets through
+        acked.add(seg_o)
+        return [(NODE, seq_zero, block(acked))]
+
+    stub = AckingProxy(one_new_segment_per_round)
+    send_through(stub)  # six rounds, more than 1 + SEGMENT_RETRANSMITS, but each one progressed
+    assert stub.acked == set(range(6))
+    assert stub.segments == [*range(6), *range(5), *range(4), *range(3), *range(2), 0]
+
+
+def test_a_repeated_partial_ack_does_not_count_as_progress(monkeypatch):
+    monkeypatch.setattr(proxy, "SEGMENT_ACK_TIMEOUT", 0.05)
+
+    def always_only_segment_0(seg_o, seq_zero, acked):
+        return [(NODE, seq_zero, 0b1)]
+
+    stub = AckingProxy(always_only_segment_0)
+    with pytest.raises(MeshTimeout):
+        send_through(stub)
+    # Segment 0 is acked in the first round; then 1 + SEGMENT_RETRANSMITS rounds without
+    # progress, each waiting out its timeout despite the repeated acks.
+    rounds = 1 + proxy.SEGMENT_RETRANSMITS
+    assert stub.segments == [0, 1, 2, 3, 4, 5] + [1, 2, 3, 4, 5] * rounds
+
+
+def test_acks_from_another_src_or_for_another_seq_zero_are_ignored(monkeypatch):
+    monkeypatch.setattr(proxy, "SEGMENT_ACK_TIMEOUT", 0.02)
+
+    def wrong_acks(seg_o, seq_zero, acked):
+        return [(NODE + 5, seq_zero, 0b111111), (NODE, seq_zero ^ 1, 0b111111)]
+
+    stub = AckingProxy(wrong_acks)
+    with pytest.raises(MeshTimeout):
+        send_through(stub)
+    assert len(stub.segments) == 6 * (1 + proxy.SEGMENT_RETRANSMITS)
+
+
+def test_group_segmented_send_does_not_wait_for_acks(monkeypatch):
+    monkeypatch.setattr(proxy, "SEGMENT_GROUP_INTERVAL", 0.01)
+    sent = record_network_pdus(monkeypatch)
+    sim = SimMesh()
+
+    async def scenario():
+        _, _, link = make_link(sim)
+        await link.send(0xC000, SIX_SEGMENTS)
+
+    run(scenario(), timeout=0.5)  # no Segment Ack ever comes from a group
+    assert [pdu.dst for pdu in sim.from_client] == [0xC000] * 6 * (1 + proxy.SEGMENT_RETRANSMITS)
+    assert len(sent) == len(set(sent))  # every send has a fresh seq
