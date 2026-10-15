@@ -174,7 +174,7 @@ async def test_the_old_entitys_id_moves_to_ours(hass: HomeAssistant) -> None:
 async def test_the_swap_goes_through_the_restored_state_the_unloaded_fork_leaves(
     hass: HomeAssistant,
 ) -> None:
-    """The Pi's real path: unloading the fork leaves a restored "unavailable" state behind."""
+    """The real path: unloading the fork leaves a restored "unavailable" state behind."""
     source = tuya_entry(hass)
     fork = fork_entity(hass, source, "light")
     hass.states.async_set("light.mesh_cw", "unavailable", {"restored": True})

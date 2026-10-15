@@ -11,7 +11,7 @@ from tests.sim.mesh_sim import APP_KEY, NET_KEY
 
 DEV_KEY = bytes(range(16))
 
-# The shape of this house's tuya_ble_mesh entry (keys replaced by the sim's test keys).
+# The shape of a tuya_ble_mesh SIG Mesh entry, with the sim's test keys.
 TUYA_DATA = {
     "device_type": "sig_plug",
     "mac_address": "dc:23:50:00:00:19",

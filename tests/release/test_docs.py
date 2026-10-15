@@ -48,7 +48,9 @@ FORBIDDEN_NAMES = {
     "openrouterkeybackup.txt",
 }
 SKIP_DIRS = {".git", ".pytest_cache", ".ruff_cache", "__pycache__", ".venv", ".superpowers"}
-HOUSE_DETAILS = re.compile(r"192\.168\.\d+\.\d+")
+PRIVATE_IP = re.compile(r"\b(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b")
+MAC = re.compile(r"(?i)\b[0-9a-f]{2}([:-])[0-9a-f]{2}(?:\1[0-9a-f]{2}){4}\b")
+TEST_MACS = ("AA:", "DC:23:50:00:00:")  # made up; a real device's MAC is a house detail
 
 
 def test_no_forbidden_files_or_house_details() -> None:
@@ -58,4 +60,7 @@ def test_no_forbidden_files_or_house_details() -> None:
         assert path.name not in FORBIDDEN_NAMES, path
         assert not path.name.endswith((".pem", ".key")), path
         if path.suffix in {".md", ".json", ".yaml", ".yml", ".toml", ".py", ".txt"}:
-            assert not HOUSE_DETAILS.search(path.read_text(errors="ignore")), path
+            text = path.read_text(errors="ignore")
+            assert not PRIVATE_IP.search(text), path
+            for mac in MAC.finditer(text):
+                assert mac[0].upper().replace("-", ":").startswith(TEST_MACS), (path, mac[0])

@@ -1,4 +1,4 @@
-"""CI installs the HA version the Pi runs, with that HA's own Bluetooth library pins."""
+"""CI installs the HA version it pins, with that HA's own Bluetooth library pins."""
 
 from __future__ import annotations
 
