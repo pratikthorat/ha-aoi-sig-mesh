@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import logging
 import os
 import struct
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -27,6 +29,7 @@ RANDOM_TIMEOUT = 10.0
 COMPLETE_TIMEOUT = 15.0
 START_DELAY = 0.5  # some devices drop a Public Key sent right after Start
 ATTENTION_SECONDS = 5  # the device blinks or beeps while it is being provisioned
+CLOSE_TIMEOUT = 5.0
 
 # Provisioning PDU types (Mesh Profile 5.4.1)
 PROV_INVITE = 0x00
@@ -382,3 +385,62 @@ class Provisioner:
             raise ProvisioningError(step, f"unexpected PDU 0x{got:02X}")
         _LOGGER.debug("Provisioning: %s done", step)
         return params
+
+
+# finding and provisioning a device
+
+
+@dataclass(frozen=True)
+class UnprovisionedDevice:
+    """A factory-reset node advertising the Mesh Provisioning Service (0x1827)."""
+
+    address: str  # Bluetooth MAC, upper case
+    name: str | None
+    rssi: int | None
+    uuid: bytes  # Device UUID
+    oob_info: int
+    remote: bool = False  # seen only through a remote (ESPHome) Bluetooth proxy
+
+
+def parse_provisioning_service_data(data: bytes) -> tuple[bytes, int] | None:
+    """The Device UUID and OOB Information of 0x1827 service data; None if it is not valid."""
+    if len(data) != 18:
+        return None
+    return bytes(data[:16]), int.from_bytes(data[16:18], "big")
+
+
+class ProvisioningRadio(Protocol):
+    def unprovisioned(self) -> list[UnprovisionedDevice]: ...
+
+    async def connect_provisioning(self, address: str) -> GattTransport: ...
+
+
+async def provision_device(
+    radio: ProvisioningRadio,
+    address: str,
+    *,
+    net_key: bytes,
+    net_key_index: int,
+    iv_index: int,
+    flags: int = 0,
+    assign: Callable[[Capabilities], Awaitable[int]],
+) -> ProvisioningResult:
+    """Connect to ``address`` over PB-GATT, provision it, and always close the link."""
+    try:
+        transport = await radio.connect_provisioning(address)
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:
+        raise ProvisioningError("connect", f"cannot connect: {err}") from err
+    try:
+        return await Provisioner(transport).provision(
+            net_key=net_key,
+            net_key_index=net_key_index,
+            iv_index=iv_index,
+            flags=flags,
+            assign=assign,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(CLOSE_TIMEOUT):
+                await transport.close()

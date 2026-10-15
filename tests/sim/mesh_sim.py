@@ -488,6 +488,18 @@ class SimMesh:
         self.nodes[unicast] = node
         return node
 
+    def add_provisioned(self, unicast: int, dev_key: bytes, net_key: bytes, kind: str) -> None:
+        """A node just provisioned: on this mesh only if it was given this mesh's NetKey.
+
+        Like a real factory-reset node it has no AppKey and no bindings yet.
+        """
+        if net_key != self.keys.net_key:
+            return
+        self.nodes[unicast] = SimNode(
+            unicast=unicast, dev_key=dev_key, kind=kind, has_app_key=False
+        )
+        self.forget_replay(unicast, self.nodes[unicast].element_count)
+
     def node_at(self, address: int) -> SimNode | None:
         for node in self.nodes.values():
             if node.unicast <= address < node.unicast + node.element_count:

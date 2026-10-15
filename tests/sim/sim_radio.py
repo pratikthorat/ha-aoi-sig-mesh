@@ -9,8 +9,10 @@ from collections.abc import Callable
 from mesh.connection import ProxyCandidate
 from mesh.errors import MeshError
 from mesh.pdu import NetworkKeys
+from mesh.provisioner import UnprovisionedDevice
 from mesh.proxy import node_identity_data
 from tests.sim.mesh_sim import LoopbackTransport, SimMesh
+from tests.sim.prov_sim import ProvisioningLoopback, SimUnprovisioned
 
 BULB_MAC = "DC:23:50:00:00:19"
 
@@ -23,6 +25,8 @@ class SimRadio:
         self.transports: list[LoopbackTransport] = []
         self.fail_connects = 0
         self.unreachable: set[str] = set()
+        self.provisioning_connects: list[str] = []
+        self._unprovisioned: dict[str, tuple[SimUnprovisioned, int | None]] = {}
         self._callbacks: list[Callable[[ProxyCandidate], None]] = []
 
     def advertise(
@@ -56,6 +60,37 @@ class SimRadio:
 
     def forget(self, address: str = BULB_MAC) -> None:
         self.adverts.pop(address, None)
+        self._unprovisioned.pop(address, None)
+
+    # provisioning (0x1827)
+
+    def advertise_unprovisioned(self, device: SimUnprovisioned, *, rssi: int | None = -60) -> None:
+        """A factory-reset node starts advertising; once provisioned it joins ``self.mesh``
+        (if given its NetKey) and advertises the Mesh Proxy service instead."""
+        device.on_provisioned = self._provisioned
+        self._unprovisioned[device.address] = (device, rssi)
+        self.adverts.pop(device.address, None)
+
+    def unprovisioned(self) -> list[UnprovisionedDevice]:
+        return [
+            UnprovisionedDevice(address, device.name, rssi, device.uuid, device.oob_info)
+            for address, (device, rssi) in self._unprovisioned.items()
+        ]
+
+    async def connect_provisioning(self, address: str) -> ProvisioningLoopback:
+        self.provisioning_connects.append(address)
+        found = self._unprovisioned.get(address)
+        if found is None or address in self.unreachable:
+            raise MeshError(f"cannot connect to {address}")
+        return found[0].connect()
+
+    def _provisioned(self, device: SimUnprovisioned) -> None:
+        data, dev_key = device.provisioned, device.dev_key
+        assert data is not None and dev_key is not None
+        _, rssi = self._unprovisioned.pop(device.address)
+        self.mesh.add_provisioned(data.unicast, dev_key, data.net_key, device.kind)
+        network_id = NetworkKeys.from_net_key(data.net_key).network_id
+        self.advertise(device.address, rssi=rssi, network_id=network_id, name=device.name)
 
     def proxies(self) -> list[ProxyCandidate]:
         return list(self.adverts.values())
