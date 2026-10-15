@@ -22,9 +22,8 @@ HALO = (245, 158, 11, 70)
 TEXT_LIGHT_THEME = (17, 24, 39, 255)
 TEXT_DARK_THEME = (243, 244, 246, 255)
 WORDMARK = "AoI SIG Mesh"
-FONTS = (
-    "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+FONTS = (  # a capital I with serifs, so "AoI" never reads as "Aol"
+    "/System/Library/Fonts/Supplemental/Verdana Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 )
 
@@ -35,8 +34,8 @@ def mesh_icon(size: int) -> Image.Image:
     image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     centre = big / 2
-    ring = big * 0.36
-    node_r = big * 0.085
+    ring = big * 0.405  # the top and bottom nodes reach the edge: no wasted margin
+    node_r = big * 0.092
     centre_r = big * 0.13
     points = [
         (
@@ -69,10 +68,10 @@ def font(height: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 def logo(height: int, text_colour: tuple[int, int, int, int]) -> Image.Image:
     """The icon, then the wordmark, on a transparent background."""
     icon = mesh_icon(height)
-    face = font(round(height * 0.38))
+    face = font(round(height * 0.34))
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     left, top, right, bottom = probe.textbbox((0, 0), WORDMARK, font=face)
-    gap = round(height * 0.14)
+    gap = round(height * 0.12)
     width = height + gap + (right - left) + round(height * 0.08)
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     image.alpha_composite(icon, (0, 0))
