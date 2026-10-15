@@ -5,8 +5,13 @@ import logging
 import pytest
 
 from mesh import proxy
-from mesh.config import OP_COMPOSITION_STATUS, config_composition_get, parse_composition_status
-from mesh.errors import LinkClosedError, MeshTimeout
+from mesh.config import (
+    OP_COMPOSITION_STATUS,
+    config_appkey_add,
+    config_composition_get,
+    parse_composition_status,
+)
+from mesh.errors import LinkClosedError, MeshTimeout, SeqNotSaved
 from mesh.models import (
     OP_CTL_TEMP_STATUS,
     OP_ONOFF_STATUS,
@@ -428,3 +433,27 @@ def test_failing_on_beacon_callback_leaves_the_link_up(caplog):
 
     assert run(scenario()) == (True, 1, b"\x00")
     assert "on_beacon callback failed" in caplog.text
+
+
+def test_unsaved_seq_fails_a_send_before_anything_is_written():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        network = MeshNetwork(
+            net_key=NET_KEY,
+            app_key=APP_KEY,
+            address=CLIENT,
+            state={"iv_index": 0},
+            on_persist=lambda state: None,  # an async save that never confirms
+            persist_is_durable=False,
+        )
+        link = ProxyLink(network, transport, dev_key_for=sim.dev_key_for)
+        with pytest.raises(SeqNotSaved):
+            await link.send(node.unicast, onoff_get())
+        with pytest.raises(SeqNotSaved):  # segmented
+            await link.send(node.unicast, config_appkey_add(0, 0, APP_KEY), dev_key=node.dev_key)
+        return transport.writes, link.is_connected
+
+    assert run(scenario()) == ([], True)

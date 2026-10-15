@@ -1,9 +1,10 @@
 import json
+import random
 
 import pytest
 
-from mesh.errors import MeshError
-from mesh.network import SEQ_MAX, BeaconOutcome, MeshNetwork
+from mesh.errors import MeshError, SeqNotSaved
+from mesh.network import RESERVE_MARGIN, SEQ_BLOCK, SEQ_MAX, BeaconOutcome, MeshNetwork
 from mesh.pdu import SecureBeacon
 
 NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
@@ -57,11 +58,12 @@ def test_seq_block_is_persisted_before_use():
     net = make(saved=saved)
     net.next_seq()
     assert saved == [{"iv_index": 0, "iv_update": False, "seq": 65, "replay": {}}]
-    for _ in range(64):  # seqs 1..64 fit in the reserved block
+    for _ in range(32):  # seqs 1..32 stay more than RESERVE_MARGIN below the ceiling
         net.next_seq()
     assert len(saved) == 1
-    assert net.next_seq() == 65
-    assert saved[-1]["seq"] == 130
+    assert net.next_seq() == 33  # within RESERVE_MARGIN of the ceiling: the next block is saved
+    assert len(saved) == 2
+    assert saved[-1]["seq"] == 129
 
 
 def test_failed_persist_hands_out_no_seq():
@@ -297,3 +299,148 @@ def test_restart_after_iv_reset_resumes_safely():
     assert len(resaved) == 1  # a new ceiling was persisted before the seq was handed out
     assert resaved[0]["seq"] > seq
     assert (resaved[0]["iv_index"], resaved[0]["iv_update"]) == (1, False)
+
+
+class DeferredStore:
+    """An async store like Home Assistant's: on_persist only queues a write.
+
+    The test decides when a queued write lands (``confirm``), is lost (``drop``) or when
+    the process crashes (``restart``): only the last confirmed state survives a crash.
+    """
+
+    def __init__(self, disk=None):
+        self.disk = disk
+        self.queue = []
+        self.net = None
+
+    def start(self):
+        self.queue = []  # pending writes die with the process
+        self.net = MeshNetwork(
+            net_key=NET_KEY,
+            app_key=APP_KEY,
+            address=0x0001,
+            state=self.disk,
+            on_persist=self.queue.append,
+            persist_is_durable=False,
+        )
+        return self.net
+
+    def confirm(self):
+        """Every queued write lands, in order."""
+        while self.queue:
+            self.confirm_oldest()
+
+    def confirm_oldest(self):
+        self.disk = self.queue.pop(0)
+        self.net.mark_persisted(self.disk)
+
+    def drop_oldest(self):
+        self.queue.pop(0)
+
+
+def test_deferred_save_refuses_seqs_beyond_the_saved_ceiling():
+    store = DeferredStore()
+    net = store.start()
+    net.prime()
+    store.confirm()
+    assert store.disk["seq"] == SEQ_BLOCK
+    used = [net.next_seq() for _ in range(SEQ_BLOCK - RESERVE_MARGIN + 1)]
+    assert [state["seq"] for state in store.queue] == [2 * SEQ_BLOCK]  # reserved ahead
+    used += [net.next_seq() for _ in range(SEQ_BLOCK - len(used))]  # still covered by the disk
+    assert used == list(range(SEQ_BLOCK))
+    with pytest.raises(SeqNotSaved):
+        net.next_seq()
+    restarted = store.start()  # crash before the reservation was written
+    restarted.prime()
+    store.confirm()
+    assert restarted.next_seq() >= max(used) + 1
+
+
+def test_deferred_save_after_iv_reset_refuses_seqs_until_confirmed():
+    store = DeferredStore({"iv_index": 5, "iv_update": True, "seq": 1000})
+    net = store.start()
+    assert net.tx_iv_index == 4
+    assert net.apply_beacon(beacon(5)) is BeaconOutcome.UPDATED  # tx 4 -> 5 resets seq
+    assert net.tx_iv_index == 5
+    with pytest.raises(SeqNotSaved):
+        net.next_seq()
+    store.confirm()
+    used = [net.next_seq() for _ in range(3)]
+    assert (net.tx_iv_index, used) == (5, [0, 1, 2])
+    restarted = store.start()
+    assert restarted.tx_iv_index == 5  # never back to 4
+    restarted.prime()
+    store.confirm()
+    assert restarted.next_seq() > max(used)
+
+
+def test_late_confirmation_of_an_older_state_does_not_lower_the_saved_ceiling():
+    store = DeferredStore()
+    net = store.start()
+    net.prime()
+    older = store.queue.pop()
+    net.mark_persisted(older)  # ceiling 64
+    for _ in range(SEQ_BLOCK - RESERVE_MARGIN + 1):
+        net.next_seq()
+    newer = store.queue.pop()
+    assert newer["seq"] == 2 * SEQ_BLOCK
+    net.mark_persisted(newer)
+    net.mark_persisted(older)  # a late confirmation of the earlier write
+    while net.next_seq() < 2 * SEQ_BLOCK - 1:
+        pass  # every seq below the newer ceiling is still allowed
+    with pytest.raises(SeqNotSaved):
+        net.next_seq()
+
+
+def test_prime_reserves_a_block_before_the_first_seq():
+    store = DeferredStore()
+    with pytest.raises(SeqNotSaved):
+        store.start().next_seq()  # nothing saved yet
+    net = store.start()
+    net.prime()
+    assert [state["seq"] for state in store.queue] == [SEQ_BLOCK]
+    store.confirm()
+    assert [net.next_seq() for _ in range(RESERVE_MARGIN)] == list(range(RESERVE_MARGIN))
+    assert store.queue == []  # no further save was needed
+
+
+def test_random_deferred_saves_never_reuse_a_nonce():
+    rnd = random.Random(20261015)
+    for _ in range(500):
+        store = DeferredStore(
+            {
+                "iv_index": rnd.randint(0, 3),
+                "iv_update": rnd.random() < 0.5,
+                "seq": rnd.randint(0, 200),
+            }
+        )
+        net = store.start()
+        handed_out = set()
+        last_tx = 0
+        for _ in range(80):
+            action = rnd.random()
+            if action < 0.45:
+                count = rnd.randint(1, 5)
+                tx = net.tx_iv_index
+                try:
+                    first = net.next_seq(count)
+                except SeqNotSaved:
+                    continue
+                for seq in range(first, first + count):
+                    assert (tx, seq) not in handed_out
+                    handed_out.add((tx, seq))
+                assert tx >= last_tx
+                last_tx = tx
+            elif action < 0.55:
+                iv_index = max(net.iv_index + rnd.choice((-1, 0, 0, 1, 1, 2)), 0)
+                net.apply_beacon(beacon(iv_index, iv_update=rnd.random() < 0.5))
+            elif action < 0.75:
+                if store.queue:
+                    store.confirm_oldest()
+            elif action < 0.83:
+                if store.queue:
+                    store.drop_oldest()
+            elif action < 0.9:
+                net.prime()
+            else:
+                net = store.start()  # crash: only the last confirmed state survives

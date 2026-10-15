@@ -7,10 +7,11 @@ from collections.abc import Callable
 from typing import Any
 
 from .crypto import k4
-from .errors import MeshError
+from .errors import MeshError, SeqNotSaved
 from .pdu import NetworkKeys, SecureBeacon
 
 SEQ_BLOCK = 64
+RESERVE_MARGIN = SEQ_BLOCK // 2  # reserve the next block this far before the ceiling
 SEQ_MAX = 0xFFFFFF
 IV_INDEX_MAX = 0xFFFFFFFF
 
@@ -22,7 +23,15 @@ class BeaconOutcome(enum.Enum):
 
 
 class MeshNetwork:
-    """Persistent state of one mesh network, as seen by our provisioner address."""
+    """Persistent state of one mesh network, as seen by our provisioner address.
+
+    Contract: a seq is handed out only when a saved state covers it at the current
+    transmit IV index, so a crash can never reuse an (IV index, seq) pair.
+
+    ``on_persist`` is called with the state to save. With ``persist_is_durable`` True, a
+    call that returns without raising counts as saved. With False (an async store), the
+    owner calls ``mark_persisted`` with that exact state once the write has finished.
+    """
 
     def __init__(
         self,
@@ -34,6 +43,7 @@ class MeshNetwork:
         app_key_index: int = 0,
         state: dict[str, Any] | None = None,
         on_persist: Callable[[dict[str, Any]], None] | None = None,
+        persist_is_durable: bool = True,
     ) -> None:
         if len(net_key) != 16 or len(app_key) != 16:
             raise ValueError("NetKey and AppKey must be 16 bytes")
@@ -61,6 +71,10 @@ class MeshNetwork:
             if not (0 <= iv <= IV_INDEX_MAX and 0 <= seq <= SEQ_MAX):
                 raise ValueError(f"stored replay entry for 0x{src:04X} is out of range")
         self._on_persist = on_persist
+        self._persist_is_durable = persist_is_durable
+        # The highest saved (transmit IV index, seq ceiling). A restored state came from disk.
+        self._durable_tx_iv = self.tx_iv_index  # (0, 0) without a state
+        self._durable_ceiling = self._ceiling
 
     def __repr__(self) -> str:
         return (
@@ -79,23 +93,55 @@ class MeshNetwork:
     def _persist(self) -> None:
         if self._on_persist is not None:
             self._on_persist(self.persistent_state())
+        if self._persist_is_durable:
+            self._mark_durable(self.tx_iv_index, self._ceiling)
+
+    def _mark_durable(self, tx_iv_index: int, ceiling: int) -> None:
+        """Advance the saved (transmit IV index, ceiling) pair; it never moves back."""
+        if (tx_iv_index, ceiling) > (self._durable_tx_iv, self._durable_ceiling):
+            self._durable_tx_iv = tx_iv_index
+            self._durable_ceiling = ceiling
+
+    def mark_persisted(self, state: dict[str, Any]) -> None:
+        """Confirm that ``state`` (exactly as given to ``on_persist``) is now on disk."""
+        tx_iv_index = _tx_iv_index(int(state["iv_index"]), bool(state["iv_update"]))
+        self._mark_durable(tx_iv_index, int(state["seq"]))
+
+    def _reserve(self, ceiling: int) -> None:
+        """Raise the ceiling and persist it; a failed persist restores the old one."""
+        previous = self._ceiling
+        self._ceiling = ceiling
+        try:
+            self._persist()
+        except Exception:
+            self._ceiling = previous
+            raise
+
+    def prime(self) -> None:
+        """Reserve and persist the next block now, before any seq is needed.
+
+        With an async store, await the save and ``mark_persisted`` before starting a link,
+        so the first message after a restart is not refused.
+        """
+        self._reserve(min(max(self._ceiling, self._seq + SEQ_BLOCK), SEQ_MAX + 1))
 
     def next_seq(self, count: int = 1) -> int:
-        """Hand out ``count`` consecutive seqs; the reserved ceiling is persisted first."""
+        """Hand out ``count`` consecutive seqs.
+
+        The next block is reserved and persisted once the seqs come within RESERVE_MARGIN
+        of the ceiling. Raises ``SeqNotSaved`` (taking no seq) when no saved state covers
+        the seqs at the current transmit IV index yet: the save is pending, so try again.
+        """
         if count < 1:
             raise ValueError(f"count must be at least 1, got {count}")
         first = self._seq
         end = first + count
         if end > SEQ_MAX + 1:
             raise MeshError("sequence numbers exhausted; the network needs an IV Update")
-        if end > self._ceiling:
-            previous = self._ceiling
-            self._ceiling = min(end + SEQ_BLOCK, SEQ_MAX + 1)
-            try:
-                self._persist()
-            except Exception:
-                self._ceiling = previous
-                raise
+        if end > self._ceiling - RESERVE_MARGIN:
+            self._reserve(min(max(self._ceiling, end) + SEQ_BLOCK, SEQ_MAX + 1))
+        if self.tx_iv_index != self._durable_tx_iv or end > self._durable_ceiling:
+            raise SeqNotSaved("Sequence numbers are reserved but not saved yet; try again shortly")
         self._seq = end
         return first
 
@@ -123,9 +169,7 @@ class MeshNetwork:
     @property
     def tx_iv_index(self) -> int:
         """While an IV Update is in progress we keep sending with the old IV index."""
-        if self._iv_update and self._iv_index > 0:
-            return self._iv_index - 1
-        return self._iv_index
+        return _tx_iv_index(self._iv_index, self._iv_update)
 
     def rx_iv_index(self, ivi: int) -> int | None:
         """The IV index a received PDU used, picked by its IVI bit."""
@@ -159,3 +203,10 @@ class MeshNetwork:
             self._reset_seq()
         self._persist()
         return BeaconOutcome.UPDATED
+
+
+def _tx_iv_index(iv_index: int, iv_update: bool) -> int:
+    """The IV index we send with: the old one while an IV Update is in progress."""
+    if iv_update and iv_index > 0:
+        return iv_index - 1
+    return iv_index

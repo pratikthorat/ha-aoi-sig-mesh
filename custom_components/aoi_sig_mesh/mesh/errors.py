@@ -25,6 +25,10 @@ class LinkClosedError(MeshError):
     """The proxy link is closed or dropped."""
 
 
+class SeqNotSaved(MeshError):
+    """Sequence numbers are reserved but not saved yet; try again shortly."""
+
+
 class NotProvisionedError(MeshError):
     """The operation needs a provisioned node or network."""
 
