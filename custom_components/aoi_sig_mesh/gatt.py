@@ -19,7 +19,7 @@ PROVISIONING_DATA_OUT_UUID = "00002adc-0000-1000-8000-00805f9b34fb"
 DISCONNECT_TIMEOUT = 2.0  # close() must return even if the adapter never answers
 CACHE_CLEAR_TIMEOUT = 2.0  # well under provisioner.CLOSE_TIMEOUT, which bounds all of close()
 MIN_WRITE = 20  # ATT_MTU 23 - 3
-WRITE_TIMEOUT = 5.0  # seconds; read at call time, so tests can shorten it
+WRITE_TIMEOUT = 5.0  # seconds, per write and for the notify enable; read at call time
 
 
 class BleakGattTransport:
@@ -93,7 +93,17 @@ class BleakGattTransport:
             raise MeshError(f"the {self._label} service lacks Data In/Out")
         self._data_in = data_in
         self.max_write = max(MIN_WRITE, int(data_in.max_write_without_response_size or 0))
-        await client.start_notify(data_out, self._on_notify)
+        limit = WRITE_TIMEOUT
+        try:
+            # The notify enable is a CCCD write the device must answer.
+            async with asyncio.timeout(limit) as deadline:
+                await client.start_notify(data_out, self._on_notify)
+        except TimeoutError as err:
+            if not deadline.expired():
+                raise
+            raise MeshError(
+                f"the {self._label} notifications did not start in {limit:g} s"
+            ) from err
         _LOGGER.debug(
             "%s characteristics: in=%s out=%s", self._label, data_in.handle, data_out.handle
         )

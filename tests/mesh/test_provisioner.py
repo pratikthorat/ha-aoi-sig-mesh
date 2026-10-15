@@ -579,6 +579,65 @@ def test_a_failed_write_at_the_random_step_names_it():
     run(scenario())
 
 
+def test_a_hanging_provisioning_connect_times_out_at_connect(monkeypatch):
+    """A proxy that accepts the connect but never finishes it (or the notify enable)."""
+
+    async def scenario():
+        monkeypatch.setattr(provisioner, "PROVISIONING_CONNECT_TIMEOUT", 0.05)
+        cancelled = []
+
+        class Radio:
+            async def connect_provisioning(self, address):
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.append(address)
+                    raise
+
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(ProvisioningError) as caught:
+            await provision_device(
+                Radio(),
+                "AA:00:00:00:00:27",
+                net_key=SIM_NET_KEY,
+                net_key_index=0,
+                iv_index=0,
+                assign=assign_0x10,
+            )
+        assert asyncio.get_running_loop().time() - started < 1
+        assert (caught.value.step, caught.value.message) == ("connect", "timed out after 0.05 s")
+        assert cancelled == ["AA:00:00:00:00:27"]  # the connect itself was stopped
+
+    run(scenario())
+
+
+def test_the_provisioning_connect_timeout_is_30_s():
+    assert provisioner.PROVISIONING_CONNECT_TIMEOUT == 30.0
+
+
+def test_a_connect_error_of_its_own_is_not_called_a_timeout(monkeypatch):
+    async def scenario():
+        class Radio:
+            async def connect_provisioning(self, address):
+                raise TimeoutError("bleak gave up")
+
+        with pytest.raises(ProvisioningError) as caught:
+            await provision_device(
+                Radio(),
+                "AA:00:00:00:00:27",
+                net_key=SIM_NET_KEY,
+                net_key_index=0,
+                iv_index=0,
+                assign=assign_0x10,
+            )
+        assert (caught.value.step, caught.value.message) == (
+            "connect",
+            "cannot connect: bleak gave up",
+        )
+
+    run(scenario())
+
+
 def test_cancelling_provision_device_closes_the_transport(monkeypatch):
     async def scenario():
         monkeypatch.setattr(provisioner, "CAPABILITIES_TIMEOUT", 30.0)

@@ -11,6 +11,7 @@ import pytest
 from homeassistant.components import bluetooth as ha_bluetooth
 from homeassistant.core import HomeAssistant
 
+from custom_components.aoi_sig_mesh import gatt
 from custom_components.aoi_sig_mesh.gatt import BleakGattTransport
 from custom_components.aoi_sig_mesh.mesh.errors import MeshError
 from custom_components.aoi_sig_mesh.mesh.provisioner import UnprovisionedDevice
@@ -117,6 +118,26 @@ async def test_a_cancelled_connect_disconnects_the_client(hass: HomeAssistant) -
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+    assert client.disconnects == 1
+
+
+async def test_a_provisioning_connect_whose_notify_hangs_fails_and_disconnects(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gatt, "WRITE_TIMEOUT", 0.05)
+    client = factory_reset_plug()
+    client.hang_notify = True
+    with (
+        patch(f"{BT}.async_ble_device_from_address", return_value=object()),
+        patch(
+            "custom_components.aoi_sig_mesh.radio.establish_connection",
+            AsyncMock(return_value=client),
+        ),
+    ):
+        async with asyncio.timeout(1):
+            with pytest.raises(MeshError):
+                await HaBluetoothRadio(hass).connect_provisioning("DC:23:50:00:00:27")
 
     assert client.disconnects == 1
 

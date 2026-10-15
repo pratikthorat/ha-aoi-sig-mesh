@@ -85,6 +85,7 @@
       "already_configured": "This network or device is already set up.",
       "no_import_source": "There is nothing to import: no Tuya BLE Mesh SIG Mesh entry was found.",
       "network_gone": "The network was removed while this form was open. Start again.",
+      "network_gone_after_add": "The network was removed while {name} was being added. Factory-reset the device before you add it again.",
       "not_supported": "This Bluetooth device cannot be set up from discovery.",
       "node_added": "The device was added to your existing network.",
       "address_conflict": "This device's old integration sent from this network's own address; importing it would be unsafe.",
@@ -195,7 +196,8 @@
         "unknown": "Something unexpected went wrong while adding the device ({detail}). Check the Home Assistant log and try again.",
         "already_provisioning": "That device is already being added in another window.",
         "reset_failed": "{name} did not confirm the reset. Check it is powered and in range, or tick the box to delete it here anyway.",
-        "reset_not_running": "The network is not running, so nothing was sent. Check the network is enabled and try again, or tick the box to delete the device here."
+        "reset_not_running": "The network is not running, so nothing was sent. Check the network is enabled and try again, or tick the box to delete the device here.",
+        "reset_no_proxy": "No mesh proxy is in range, so nothing was sent. Move closer or check the device has power, then try again, or tick the box to delete the device here."
       }
     }
   },

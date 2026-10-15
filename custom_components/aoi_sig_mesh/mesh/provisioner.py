@@ -27,6 +27,7 @@ PUBLIC_KEY_TIMEOUT = 15.0
 CONFIRMATION_TIMEOUT = 10.0
 RANDOM_TIMEOUT = 10.0
 COMPLETE_TIMEOUT = 15.0
+PROVISIONING_CONNECT_TIMEOUT = 30.0  # the connect and the attach (with its notify enable)
 INBOX_SIZE = 16  # PDUs queued from the device; a well-behaved one sends one at a time
 START_DELAY = 0.5  # some devices drop a Public Key sent right after Start
 ATTENTION_SECONDS = 5  # the device blinks or beeps while it is being provisioned
@@ -465,11 +466,15 @@ async def provision_device(
     assign: Callable[[Capabilities], Awaitable[int]],
 ) -> ProvisioningResult:
     """Connect to ``address`` over PB-GATT, provision it, and always close the link."""
+    limit = PROVISIONING_CONNECT_TIMEOUT
     try:
-        transport = await radio.connect_provisioning(address)
+        async with asyncio.timeout(limit) as deadline:
+            transport = await radio.connect_provisioning(address)
     except asyncio.CancelledError:
         raise
     except Exception as err:
+        if isinstance(err, TimeoutError) and deadline.expired():
+            raise ProvisioningError("connect", f"timed out after {limit:g} s") from err
         raise ProvisioningError("connect", f"cannot connect: {err}") from err
     try:
         return await Provisioner(transport).provision(

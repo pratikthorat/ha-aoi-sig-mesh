@@ -985,9 +985,12 @@ class MeshCoordinator:
             self._spawn(self._async_nudge_connect(), "aoi_sig_mesh setup again connect")
 
     async def _async_nudge_connect(self) -> None:
-        """Ask the manager for a link; its connect pass does the work. A miss is harmless."""
-        with contextlib.suppress(MeshTimeout):
+        """Ask the manager for a link; its connect pass does the work. A miss is harmless: the
+        node is set up on the next connect."""
+        try:
             await self.manager.get_link(COMMAND_CONNECT_TIMEOUT)
+        except MeshError as err:  # MeshTimeout, or a link that dropped at once
+            _LOGGER.debug("%s: no connect for setup again: %s", self.entry.title, err)
 
     async def async_identify(self, subentry_id: str) -> None:
         record = self.nodes[subentry_id]

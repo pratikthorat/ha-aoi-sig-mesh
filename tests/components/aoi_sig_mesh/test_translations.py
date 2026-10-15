@@ -68,6 +68,7 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config.abort.no_address",
         "config.abort.unknown",
         "config.abort.already_provisioning",
+        "config.abort.network_gone_after_add",
         "options.step.init.data.idle_timeout",
         "options.step.init.data.publish_setup",
         "config_subentries.node.initiate_flow.user",
@@ -79,6 +80,7 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config_subentries.node.step.reset_remove.data.remove_anyway",
         "config_subentries.node.error.reset_failed",
         "config_subentries.node.error.reset_not_running",
+        "config_subentries.node.error.reset_no_proxy",
         "config_subentries.node.abort.setup_again_started",
         "config_subentries.node.abort.device_reset",
         "config_subentries.node.abort.device_removed",
@@ -165,6 +167,7 @@ def test_provisioning_texts_use_only_the_placeholders_the_flow_passes() -> None:
     config = STRINGS["config"]
     assert placeholders(config["step"]["device"]["description"]) == {"name"}
     assert placeholders(config["abort"]["device_added"]) == {"name", "network"}
+    assert placeholders(config["abort"]["network_gone_after_add"]) == {"name"}
     assert placeholders(config["flow_title"]) == {"name"}
     node = STRINGS["config_subentries"]["node"]
     for text in (
@@ -176,6 +179,8 @@ def test_provisioning_texts_use_only_the_placeholders_the_flow_passes() -> None:
         node["abort"]["device_removed"],
     ):
         assert placeholders(text) == {"name"}
+    for key in ("reset_not_running", "reset_no_proxy"):  # the flow passes {name}; unused here
+        assert placeholders(node["error"][key]) == set()
 
 
 def test_exceptions_name_the_device() -> None:

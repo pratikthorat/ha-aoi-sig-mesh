@@ -49,8 +49,11 @@ class FakeClient:
     hang_disconnect: bool = False
     fail_disconnect: bool = False
     hang_writes: bool = False
+    hang_notify: bool = False
 
     async def start_notify(self, char: FakeChar, callback: Any) -> None:
+        if self.hang_notify:
+            await asyncio.Event().wait()  # the CCCD write is never answered
         self.notify[char.handle] = callback
 
     async def write_gatt_char(self, char: FakeChar, data: bytes, response: bool) -> None:
@@ -218,6 +221,25 @@ async def test_a_hung_write_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     async with asyncio.timeout(1):
         with pytest.raises(TimeoutError):
             await transport.write(b"\x00\x01")
+
+
+@pytest.mark.parametrize("make_client", [tuya_bulb, factory_reset_plug])
+async def test_a_hung_notify_enable_fails_the_attach(
+    monkeypatch: pytest.MonkeyPatch, make_client: Any
+) -> None:
+    """A proxy that never answers the notify enable must not hang the connect."""
+    monkeypatch.setattr(gatt, "WRITE_TIMEOUT", 0.05)
+    client = make_client()
+    client.hang_notify = True
+    transport = (
+        BleakGattTransport.provisioning()
+        if make_client is factory_reset_plug
+        else BleakGattTransport()
+    )
+
+    async with asyncio.timeout(1):
+        with pytest.raises(MeshError, match="notifications did not start in 0.05 s"):
+            await transport.async_attach(client)
 
 
 async def test_a_notification_after_close_is_dropped() -> None:

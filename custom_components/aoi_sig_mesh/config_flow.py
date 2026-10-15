@@ -469,7 +469,13 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
         data = provisioned_subentry_data(result, self._role, self._device.address)
         unique_id = node_unique_id(result.unicast)
         self._abort_other_device_flows()
-        if (entry := self._target) is not None:
+        if self._target is not None:
+            # Fetched again: the network may have been removed while the device was added.
+            entry = self.hass.config_entries.async_get_entry(self._target.entry_id)
+            if entry is None:
+                return self.async_abort(
+                    reason="network_gone_after_add", description_placeholders={"name": title}
+                )
             forget_replay(entry, result)
             self.hass.config_entries.async_add_subentry(
                 entry,
@@ -1028,6 +1034,8 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
                     await entry.runtime_data.async_reset_node(subentry_id)
                 except HomeAssistantError as err:
                     _LOGGER.warning("%s: Node Reset was not confirmed: %s", subentry.title, err)
+                    if err.translation_key in ("not_connected", "seq_not_saved"):
+                        reason = "reset_no_proxy"  # refused before anything was sent
                 else:
                     confirmed = True
             if confirmed or user_input[CONF_REMOVE_ANYWAY]:

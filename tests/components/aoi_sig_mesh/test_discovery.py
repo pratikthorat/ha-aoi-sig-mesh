@@ -396,3 +396,28 @@ async def test_a_retry_after_the_target_network_was_deleted_does_not_use_its_key
     assert result["result"].title == "Fresh"
     await hass.async_block_till_done()
     await hass.config_entries.async_unload(result["result"].entry_id)
+
+
+async def test_the_network_deleted_while_the_device_was_being_added_aborts(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The device took the network's keys: it must be reset, and nothing is added anywhere."""
+    target = make_entry(network_id="0011223344556677")
+    target.add_to_hass(hass)
+    plug = SimUnprovisioned(PLUG_MAC, name="Plug")
+    radio.advertise_unprovisioned(plug)
+    real = config_flow.async_provision_into_entry
+
+    async def removed_meanwhile(hass: HomeAssistant, entry: Any, device: Any) -> Any:
+        await hass.config_entries.async_remove(entry.entry_id)
+        return await real(hass, entry, device)
+
+    monkeypatch.setattr(config_flow, "async_provision_into_entry", removed_meanwhile)
+    result = await discover(hass, plug)
+
+    result = await provision(hass, result, network=target.entry_id, role="auto")
+
+    assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "network_gone_after_add")
+    assert result["description_placeholders"] == {"name": "Plug"}
+    assert plug.provisioned is not None  # it really holds the deleted network's keys
+    assert hass.config_entries.async_entries(DOMAIN) == []

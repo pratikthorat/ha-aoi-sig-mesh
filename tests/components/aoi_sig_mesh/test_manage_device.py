@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -15,9 +16,11 @@ from homeassistant.exceptions import HomeAssistantError
 from custom_components.aoi_sig_mesh.const import (
     CONF_IDLE_TIMEOUT,
     CONF_PUBLISH_SETUP,
+    DOMAIN,
     SUBENTRY_NODE,
 )
 from custom_components.aoi_sig_mesh.coordinator import FAILURES_UNAVAILABLE
+from custom_components.aoi_sig_mesh.mesh.errors import LinkClosedError, MeshError, MeshTimeout
 from tests.sim.mesh_sim import SimMesh, SimNode
 from tests.sim.sim_radio import BULB_MAC, SimRadio
 
@@ -146,6 +149,56 @@ async def test_an_unconfirmed_reset_keeps_the_device_unless_asked_to_remove_it(
     assert plug_of(sim).reset  # the sim reset; only its status was lost
 
 
+@pytest.mark.parametrize(
+    ("key", "error"),
+    [
+        ("not_connected", "reset_no_proxy"),  # no proxy link: nothing was sent
+        ("seq_not_saved", "reset_no_proxy"),  # refused before sending
+        ("command_failed", "reset_failed"),  # sent, not confirmed
+    ],
+)
+async def test_a_reset_that_was_never_sent_says_so(
+    hass: HomeAssistant,
+    sim: SimMesh,
+    plug_entry: Any,
+    rediscover: MagicMock,
+    key: str,
+    error: str,
+) -> None:
+    coordinator = plug_entry.runtime_data
+    failure = HomeAssistantError(
+        translation_domain=DOMAIN, translation_key=key, translation_placeholders={"name": "Kettle"}
+    )
+    result = await open_step(hass, plug_entry, "reset_remove")
+
+    with patch.object(coordinator, "async_reset_node", side_effect=failure):
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"remove_anyway": False}
+        )
+
+    assert (result["type"], result["step_id"]) == (FlowResultType.FORM, "reset_remove")
+    assert result["errors"] == {"base": error}
+    assert len(plug_entry.subentries) == 1
+    assert not plug_of(sim).reset
+    rediscover.assert_not_called()
+
+
+async def test_a_reset_with_no_proxy_in_range_says_nothing_was_sent(
+    hass: HomeAssistant, sim: SimMesh, plug_entry: Any
+) -> None:
+    """The real path: the link is gone and no proxy comes back in time."""
+    coordinator = plug_entry.runtime_data
+    result = await open_step(hass, plug_entry, "reset_remove")
+
+    with patch.object(coordinator, "_async_command_link", return_value=None):
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"remove_anyway": False}
+        )
+
+    assert result["errors"] == {"base": "reset_no_proxy"}
+    assert not plug_of(sim).reset
+
+
 @pytest.mark.parametrize(("remove_anyway", "removed"), [(False, False), (True, True)])
 async def test_a_network_that_is_not_running_cannot_reset(
     hass: HomeAssistant, sim: SimMesh, remove_anyway: bool, removed: bool, rediscover: MagicMock
@@ -272,3 +325,21 @@ async def test_setup_again_on_an_idle_link_connects_at_once(
         await until(lambda: coordinator.nodes[subentry_id].configured)
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [MeshTimeout("no link"), LinkClosedError("the proxy dropped"), MeshError("no proxy service")],
+)
+async def test_a_failed_setup_again_connect_is_harmless(
+    hass: HomeAssistant, plug_entry: Any, caplog: pytest.LogCaptureFixture, failure: Exception
+) -> None:
+    """The setup-again nudge runs in the background: a failed connect is logged, not raised."""
+    coordinator = plug_entry.runtime_data
+    caplog.set_level(logging.DEBUG, logger="custom_components.aoi_sig_mesh.coordinator")
+
+    with patch.object(coordinator.manager, "get_link", side_effect=failure):
+        await coordinator._async_nudge_connect()
+
+    if not isinstance(failure, MeshTimeout):
+        assert str(failure) in caplog.text
