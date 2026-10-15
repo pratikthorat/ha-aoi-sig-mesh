@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from homeassistant.config_entries import SOURCE_RECONFIGURE
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.aoi_sig_mesh.const import SUBENTRY_NODE
+from custom_components.aoi_sig_mesh.const import (
+    CONF_IDLE_TIMEOUT,
+    CONF_PUBLISH_SETUP,
+    SUBENTRY_NODE,
+)
+from custom_components.aoi_sig_mesh.coordinator import FAILURES_UNAVAILABLE
 from tests.sim.mesh_sim import SimMesh, SimNode
 from tests.sim.sim_radio import SimRadio
 
@@ -144,6 +151,79 @@ async def test_a_network_that_is_not_running_cannot_reset(
 
     assert (entry.subentries == {}) is removed
     assert result.get("reason", result.get("errors")) == (
-        "device_removed" if removed else {"base": "reset_failed"}
+        "device_removed" if removed else {"base": "reset_not_running"}
     )
     assert not plug.reset
+
+
+async def test_a_confirmed_reset_forgets_the_nodes_replay_entry(
+    hass: HomeAssistant, plug_entry: Any
+) -> None:
+    coordinator = plug_entry.runtime_data
+    result = await open_step(hass, plug_entry, "reset_remove")
+
+    with patch.object(
+        coordinator, "async_forget_node", wraps=coordinator.async_forget_node
+    ) as forget:
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"remove_anyway": False}
+        )
+
+    assert result["reason"] == "device_reset"
+    forget.assert_called_once_with(0x00C0, 1)
+
+
+async def test_deleting_anyway_after_a_silent_reset_does_not_forget_the_replay_entry(
+    hass: HomeAssistant, sim: SimMesh, plug_entry: Any
+) -> None:
+    sim.silent = True
+    coordinator = plug_entry.runtime_data
+    result = await open_step(hass, plug_entry, "reset_remove")
+
+    with patch.object(
+        coordinator, "async_forget_node", wraps=coordinator.async_forget_node
+    ) as forget:
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"], {"remove_anyway": True}
+        )
+
+    assert result["reason"] == "device_removed"
+    forget.assert_not_called()
+
+
+async def test_silent_resets_never_make_the_node_unavailable(
+    hass: HomeAssistant, sim: SimMesh, plug_entry: Any
+) -> None:
+    coordinator = plug_entry.runtime_data
+    subentry_id = next(iter(plug_entry.subentries))
+    record = coordinator.nodes[subentry_id]
+    sim.silent = True
+
+    for _ in range(FAILURES_UNAVAILABLE + 1):
+        with pytest.raises(HomeAssistantError):
+            await coordinator.async_reset_node(subentry_id)
+
+    assert record.failures == 0
+    assert record.available
+    assert hass.states.get("switch.kettle").state != "unavailable"
+
+
+async def test_setup_again_on_an_idle_link_connects_at_once(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    lamp = sim.add_node("ctl", unicast=0x00B0)
+    lamp.bindings.discard((0x00B0, HEALTH_SERVER))
+    radio.advertise()
+    options = {CONF_IDLE_TIMEOUT: 0.005, CONF_PUBLISH_SETUP: True}  # 0.3 s
+    entry = make_entry(("Desk lamp", node_data(lamp)), options=options)
+    coordinator = await setup_entry(hass, entry)
+    try:
+        await until(lambda: coordinator.manager.idle and coordinator.manager.link is None)
+        subentry_id = next(iter(entry.subentries))
+
+        coordinator.async_setup_again(subentry_id)
+
+        await until(lambda: (0x00B0, HEALTH_SERVER) in lamp.bindings)
+        await until(lambda: coordinator.nodes[subentry_id].configured)
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)

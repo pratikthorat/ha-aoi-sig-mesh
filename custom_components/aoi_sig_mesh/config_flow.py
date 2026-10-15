@@ -1002,7 +1002,9 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             confirmed = False
+            reason = "reset_not_running"  # nothing was sent: the network is not running
             if (subentry_id := self._loaded_node()) is not None:
+                reason = "reset_failed"
                 try:
                     await entry.runtime_data.async_reset_node(subentry_id)
                 except HomeAssistantError as err:
@@ -1015,7 +1017,7 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
                     reason="device_reset" if confirmed else "device_removed",
                     description_placeholders=placeholders,
                 )
-            errors["base"] = "reset_failed"
+            errors["base"] = reason
         schema = vol.Schema({vol.Required(CONF_REMOVE_ANYWAY, default=False): bool})
         return self.async_show_form(
             step_id="reset_remove",

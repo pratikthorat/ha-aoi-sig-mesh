@@ -194,7 +194,8 @@
         "cannot_save": "The device's address could not be saved ({detail}), so nothing was sent to the device. Check the Home Assistant log for disk errors and try again.",
         "unknown": "Something unexpected went wrong while adding the device ({detail}). Check the Home Assistant log and try again.",
         "already_provisioning": "That device is already being added in another window.",
-        "reset_failed": "{name} did not confirm the reset. Check it is powered and in range, or tick the box to delete it here anyway."
+        "reset_failed": "{name} did not confirm the reset. Check it is powered and in range, or tick the box to delete it here anyway.",
+        "reset_not_running": "The network is not running, so nothing was sent. Check the network is enabled and try again, or tick the box to delete the device here."
       }
     }
   },

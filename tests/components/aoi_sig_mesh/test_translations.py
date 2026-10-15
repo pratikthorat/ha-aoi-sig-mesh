@@ -78,6 +78,7 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config_subentries.node.step.role.data.role",
         "config_subentries.node.step.reset_remove.data.remove_anyway",
         "config_subentries.node.error.reset_failed",
+        "config_subentries.node.error.reset_not_running",
         "config_subentries.node.abort.setup_again_started",
         "config_subentries.node.abort.device_reset",
         "config_subentries.node.abort.device_removed",

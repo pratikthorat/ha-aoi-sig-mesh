@@ -981,6 +981,13 @@ class MeshCoordinator:
         record.configured = False
         if (link := self.manager.link) is not None:
             self._spawn(self._async_connect_pass(link), "aoi_sig_mesh setup again")
+        elif not self._stopping:  # idle or down: connect now, the connect pass sets it up
+            self._spawn(self._async_nudge_connect(), "aoi_sig_mesh setup again connect")
+
+    async def _async_nudge_connect(self) -> None:
+        """Ask the manager for a link; its connect pass does the work. A miss is harmless."""
+        with contextlib.suppress(MeshTimeout):
+            await self.manager.get_link(COMMAND_CONNECT_TIMEOUT)
 
     async def async_identify(self, subentry_id: str) -> None:
         record = self.nodes[subentry_id]
