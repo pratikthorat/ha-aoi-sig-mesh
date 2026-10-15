@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import CONF_NET_KEY, CONF_NET_KEY_INDEX, CONF_RANGE_HIGH, CONF_RANGE_LOW
 from .mesh.errors import MeshError, ProvisioningError
@@ -73,8 +74,10 @@ async def async_provision_device(
                 low=int(data[CONF_RANGE_LOW]),
                 high=int(data[CONF_RANGE_HIGH]),
             )
-        except MeshError as err:
+        except (MeshError, ValueError) as err:  # range full, or a malformed range
             raise ProvisionFailed("no_address", "capabilities", str(err)) from err
+        except (OSError, HomeAssistantError) as err:  # the strict save (WriteError) failed
+            raise ProvisionFailed("cannot_save", "capabilities", str(err)) from err
 
     try:
         return await provision_device(

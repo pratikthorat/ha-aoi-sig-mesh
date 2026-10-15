@@ -16,7 +16,7 @@ DATA_IN_UUID = "00002add-0000-1000-8000-00805f9b34fb"
 DATA_OUT_UUID = "00002ade-0000-1000-8000-00805f9b34fb"
 PROVISIONING_DATA_IN_UUID = "00002adb-0000-1000-8000-00805f9b34fb"
 PROVISIONING_DATA_OUT_UUID = "00002adc-0000-1000-8000-00805f9b34fb"
-CACHE_CLEAR_TIMEOUT = 5.0
+CACHE_CLEAR_TIMEOUT = 2.0  # well under provisioner.CLOSE_TIMEOUT, which bounds all of close()
 MIN_WRITE = 20  # ATT_MTU 23 - 3
 WRITE_TIMEOUT = 5.0  # seconds; read at call time, so tests can shorten it
 
@@ -125,14 +125,17 @@ class BleakGattTransport:
         client = self._client
         if client is None:
             return
-        clear_cache = getattr(client, "clear_cache", None)
-        if self._clear_cache_on_close and clear_cache is not None:
-            try:
-                async with asyncio.timeout(CACHE_CLEAR_TIMEOUT):
-                    await clear_cache()
-            except Exception as err:  # closing must never raise
-                _LOGGER.debug("Ignoring error while clearing the service cache: %s", err)
         try:
-            await client.disconnect()
-        except Exception as err:  # closing must never raise
-            _LOGGER.debug("Ignoring error while disconnecting: %s", err)
+            clear_cache = getattr(client, "clear_cache", None)
+            if self._clear_cache_on_close and clear_cache is not None:
+                try:
+                    async with asyncio.timeout(CACHE_CLEAR_TIMEOUT):
+                        await clear_cache()
+                except Exception as err:  # closing must never raise
+                    _LOGGER.debug("Ignoring error while clearing the service cache: %s", err)
+        finally:
+            # Always release the link, even if the caller cancels us during the cache clear.
+            try:
+                await client.disconnect()
+            except Exception as err:  # closing must never raise
+                _LOGGER.debug("Ignoring error while disconnecting: %s", err)

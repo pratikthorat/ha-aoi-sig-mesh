@@ -16,6 +16,7 @@ from custom_components.aoi_sig_mesh.gatt import (
     PROVISIONING_DATA_OUT_UUID,
     BleakGattTransport,
 )
+from custom_components.aoi_sig_mesh.mesh import provisioner
 from custom_components.aoi_sig_mesh.mesh.errors import LinkClosedError, MeshError
 
 TUYA_SERVICE_UUID = "00007fdd-0000-1000-8000-00805f9b34fb"
@@ -44,6 +45,7 @@ class FakeClient:
     notify: dict[int, Any] = field(default_factory=dict)
     disconnects: int = 0
     cache_clears: int = 0
+    hang_clear_cache: bool = False
     fail_disconnect: bool = False
     hang_writes: bool = False
 
@@ -57,6 +59,8 @@ class FakeClient:
 
     async def clear_cache(self) -> bool:
         self.cache_clears += 1
+        if self.hang_clear_cache:
+            await asyncio.Event().wait()  # a slow proxy round trip: it never answers
         return True
 
     async def disconnect(self) -> None:
@@ -224,3 +228,18 @@ async def test_a_notification_after_close_is_dropped() -> None:
     client.notify[0x22](None, bytearray(b"\x01"))
 
     assert received == []
+
+
+async def test_a_stuck_cache_clear_never_stops_the_disconnect() -> None:
+    """provision_device bounds close() by CLOSE_TIMEOUT: the link must still be released."""
+    assert gatt.CACHE_CLEAR_TIMEOUT < provisioner.CLOSE_TIMEOUT
+    client = factory_reset_plug()
+    client.hang_clear_cache = True
+    transport = BleakGattTransport.provisioning()
+    await transport.async_attach(client)
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.1):  # the outer bound fires before the cache clear's own
+            await transport.close()
+
+    assert client.disconnects == 1

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from homeassistant.core import HomeAssistant
 
@@ -128,3 +130,44 @@ async def test_a_full_range_is_no_address_and_the_device_is_untouched(
     assert caught.value.reason == "no_address"
     assert device.provisioned is None
     assert len(async_unprovisioned(hass)) == 1
+
+
+async def test_an_unreachable_device_through_a_remote_proxy_suggests_the_local_adapter(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC), remote=True)
+    radio.unreachable.add(PLUG_MAC)
+
+    with pytest.raises(ProvisionFailed) as caught:
+        await provision(hass, radio)
+
+    assert (caught.value.reason, caught.value.step) == ("provision_failed_remote", "connect")
+
+
+async def test_a_failed_save_is_cannot_save_and_the_device_is_untouched(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    device = SimUnprovisioned(PLUG_MAC)
+    radio.advertise_unprovisioned(device)
+
+    with (
+        patch.object(AddressBook, "async_reserve_node", side_effect=OSError("disk full")),
+        pytest.raises(ProvisionFailed) as caught,
+    ):
+        await provision(hass, radio)
+
+    assert (caught.value.reason, caught.value.step) == ("cannot_save", "capabilities")
+    assert device.provisioned is None
+
+
+async def test_a_malformed_range_is_no_address(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC))
+    (device,) = async_unprovisioned(hass)
+    data = {**make_entry().data, "range_low": 0x7000, "range_high": 0x0100}
+
+    with pytest.raises(ProvisionFailed) as caught:
+        await async_provision_device(hass, data, device, iv_index=0, taken=[(1, 1)])
+
+    assert (caught.value.reason, caught.value.step) == ("no_address", "capabilities")
