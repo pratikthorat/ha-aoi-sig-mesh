@@ -98,13 +98,6 @@ async def run_import(
     return result
 
 
-async def test_nothing_to_import_aborts(hass: HomeAssistant) -> None:
-    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
-
-    assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "no_import_source"
-
-
 async def test_import_creates_the_network_and_disables_the_old_entry(
     hass: HomeAssistant,
 ) -> None:
@@ -127,6 +120,7 @@ async def test_import_creates_the_network_and_disables_the_old_entry(
     assert subentry.data["configured"] is False
     assert subentry.data["models"]["ctl_temp"] == 0xB1
     assert source.disabled_by is ConfigEntryDisabler.USER
+    assert await AddressBook(hass).async_used_nodes(NETWORK_ID) == [(0x00B0, 2)]
 
 
 async def test_import_can_leave_the_old_entry_enabled(hass: HomeAssistant) -> None:
@@ -349,6 +343,7 @@ async def test_a_second_device_joins_the_network_it_belongs_to(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "node_added"
+    assert await AddressBook(hass).async_used_nodes(NETWORK_ID) == [(0x00C0, 1)]
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
     added = next(sub for sub in existing.subentries.values() if sub.title == "Hall bulb")
     assert added.unique_id == "00c0"

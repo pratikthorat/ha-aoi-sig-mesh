@@ -143,6 +143,15 @@ class AddressBook:
         data = await self._store.async_load() or {}
         return [(start, count) for start, count in data.get(NODES_KEY, {}).get(network_id, [])]
 
+    async def async_add_nodes(self, network_id: str, blocks: list[tuple[int, int]]) -> None:
+        """Record (start, count) blocks that devices on the mesh already hold (imports)."""
+        async with self._lock:
+            data = await self._store.async_load() or {}
+            nodes = data.setdefault(NODES_KEY, {})
+            known = {(start, size) for start, size in nodes.get(network_id, [])}
+            nodes[network_id] = [list(block) for block in sorted(known | set(blocks))]
+            await self._store.async_save_strict(data)
+
     async def async_reserve_node(
         self,
         network_id: str,

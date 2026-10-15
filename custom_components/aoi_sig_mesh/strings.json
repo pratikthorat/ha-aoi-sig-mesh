@@ -3,9 +3,28 @@
     "step": {
       "user": {
         "title": "Add a Bluetooth SIG Mesh network",
-        "description": "Choose where the network comes from.",
+        "description": "Create a new network, or bring in one you already have.",
         "menu_options": {
+          "create": "Create a new network",
+          "nrf_import": "Import from nRF Mesh",
           "tuya_import": "Import from Tuya BLE Mesh"
+        }
+      },
+      "create": {
+        "title": "Create a new network",
+        "description": "Home Assistant makes new random keys and becomes the network's provisioner. Then add factory-reset devices with Add device.",
+        "data": {
+          "name": "Network name"
+        }
+      },
+      "nrf_import": {
+        "title": "Import from nRF Mesh",
+        "description": "In nRF Mesh, open Settings, choose Export, export everything (with the device keys) as JSON and paste the file's contents here. The devices keep their pairing: nothing is reset.",
+        "data": {
+          "nrf_json": "Exported JSON"
+        },
+        "data_description": {
+          "nrf_json": "The export holds the network keys. Paste it here only; do not share it."
         }
       },
       "tuya_import": {
@@ -34,7 +53,13 @@
       "bad_iv_index": "The entry's IV index is missing or invalid.",
       "bad_address": "The entry's device address is invalid.",
       "bad_mac": "The entry's Bluetooth address is missing or invalid.",
-      "no_address": "No free address is left for Home Assistant in this network."
+      "no_address": "No free address is left for Home Assistant in this network.",
+      "nrf_bad_json": "This is not an nRF Mesh JSON export.",
+      "nrf_bad_keys": "The export's network or application key is missing or invalid.",
+      "nrf_key_refresh": "The network is in the middle of a key refresh. Finish it in nRF Mesh, then export again.",
+      "nrf_no_app_key": "The export has no application key for its primary network key.",
+      "nrf_bad_address": "The export has an invalid unicast address.",
+      "nrf_bad_iv_index": "The export's IV index is invalid."
     },
     "abort": {
       "already_configured": "This network or device is already set up.",

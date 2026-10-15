@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import secrets
 from types import MappingProxyType
 from typing import Any
 
@@ -33,6 +34,8 @@ from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
+    TextSelector,
+    TextSelectorConfig,
 )
 
 from .const import (
@@ -47,6 +50,7 @@ from .const import (
     CONF_NAME,
     CONF_NET_KEY,
     CONF_NET_KEY_INDEX,
+    CONF_NRF_JSON,
     CONF_PUBLISH_SETUP,
     CONF_RANGE_HIGH,
     CONF_RANGE_LOW,
@@ -56,6 +60,7 @@ from .const import (
     DEFAULT_NETWORK_NAME,
     DEFAULT_PUBLISH_SETUP,
     DOMAIN,
+    NEW_NETWORK_ADDRESS,
     PROXY_SERVICE_UUID,
     ROLE_LIGHT,
     ROLE_SWITCH,
@@ -66,8 +71,12 @@ from .coordinator import claimed_range, default_role, node_role, read_node
 from .mesh.importers import (
     NODE_RANGE_HIGH,
     NODE_RANGE_LOW,
+    NrfImport,
+    NrfImportError,
+    NrfNode,
     TuyaImport,
     TuyaImportError,
+    import_nrf_json,
     import_tuya_entry,
     is_tuya_sig_entry,
 )
@@ -93,6 +102,55 @@ def node_subentry_data(node_import: TuyaImport) -> dict[str, Any]:
 
 def node_unique_id(unicast: int) -> str:
     return f"{unicast:04x}"
+
+
+def network_data(
+    name: str,
+    net_key: bytes,
+    app_key: bytes,
+    address: int,
+    *,
+    iv_index: int = 0,
+    net_key_index: int = 0,
+    app_key_index: int = 0,
+    range_low: int = NODE_RANGE_LOW,
+    range_high: int = NODE_RANGE_HIGH,
+) -> dict[str, Any]:
+    """A network entry's data. Keys are stored as hex, as every importer stores them."""
+    return {
+        CONF_NAME: name,
+        CONF_NET_KEY: net_key.hex(),
+        CONF_NET_KEY_INDEX: net_key_index,
+        CONF_APP_KEY: app_key.hex(),
+        CONF_APP_KEY_INDEX: app_key_index,
+        CONF_ADDRESS: address,
+        CONF_RANGE_LOW: range_low,
+        CONF_RANGE_HIGH: range_high,
+        CONF_IV_INDEX: iv_index,
+    }
+
+
+DEFAULT_OPTIONS: dict[str, Any] = {
+    CONF_IDLE_TIMEOUT: DEFAULT_IDLE_TIMEOUT,
+    CONF_PUBLISH_SETUP: DEFAULT_PUBLISH_SETUP,
+}
+
+
+def nrf_subentry(nrf_node: NrfNode) -> dict[str, Any]:
+    """A node from an nRF Mesh export. Only a node with a role model not bound to our AppKey
+    still needs setup; the rest is used as the export describes it."""
+    node = nrf_node.node
+    return {
+        "subentry_type": SUBENTRY_NODE,
+        "title": nrf_node.title,
+        "unique_id": node_unique_id(node.unicast),
+        "data": {
+            **node.to_dict(),
+            CONF_ROLE: default_role(node),
+            CONF_MAC: nrf_node.mac,
+            CONF_CONFIGURED: nrf_node.configured,
+        },
+    }
 
 
 class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -137,12 +195,118 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         if not self._tuya_entries():
             return self.async_abort(reason="not_supported")
-        return await self.async_step_user()
+        # A network that already exists: making a new one would not get its devices.
+        return self.async_show_menu(step_id="user", menu_options=["tuya_import"])
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if not self._tuya_entries():
-            return self.async_abort(reason="no_import_source")
-        return self.async_show_menu(step_id="user", menu_options=["tuya_import"])
+        options = ["create", "nrf_import"]
+        if self._tuya_entries():
+            options.append("tuya_import")
+        return self.async_show_menu(step_id="user", menu_options=options)
+
+    async def _async_reserve_address(self, network_id: str, address: int) -> bool:
+        """Record ``address`` as ours for good, so no later import or reset reuses its seqs."""
+        try:
+            await AddressBook(self.hass).async_add(network_id, address)
+        except (HomeAssistantError, OSError):
+            _LOGGER.exception("Could not save the provisioner address book")
+            return False
+        return True
+
+    async def _async_reserve_nodes(self, network_id: str, blocks: list[tuple[int, int]]) -> bool:
+        """Record the addresses of imported devices, so Add device never gives them out again,
+        even after the device is deleted here (a deletion does not reset the device)."""
+        try:
+            await AddressBook(self.hass).async_add_nodes(network_id, blocks)
+        except (HomeAssistantError, OSError):
+            _LOGGER.exception("Could not save the provisioner address book")
+            return False
+        return True
+
+    async def _async_clear_ignored(self, ignored: ConfigEntry | None) -> None:
+        """HA skips async_on_create_entry when it replaces an ignored entry, so clear it
+        ourselves; an ignored entry holds no state."""
+        if ignored is not None:
+            with contextlib.suppress(UnknownEntry):  # the user removed it meanwhile
+                await self.hass.config_entries.async_remove(ignored.entry_id)
+
+    async def async_step_create(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """A new network: fresh random keys, IV index 0, Home Assistant at 0x0001."""
+        if user_input is None:
+            schema = vol.Schema({vol.Required(CONF_NAME, default=DEFAULT_NETWORK_NAME): str})
+            return self.async_show_form(step_id="create", data_schema=schema)
+        name = user_input[CONF_NAME]
+        net_key, app_key = secrets.token_bytes(16), secrets.token_bytes(16)
+        network_id = NetworkKeys.from_net_key(net_key).network_id.hex()
+        await self.async_set_unique_id(network_id, raise_on_progress=False)
+        self._abort_if_unique_id_configured()
+        if not await self._async_reserve_address(network_id, NEW_NETWORK_ADDRESS):
+            return self.async_abort(reason="cannot_save")
+        return self.async_create_entry(
+            title=name,
+            data=network_data(name, net_key, app_key, NEW_NETWORK_ADDRESS),
+            options=dict(DEFAULT_OPTIONS),
+        )
+
+    async def async_step_nrf_import(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Paste an nRF Mesh export (Settings > Export > Export everything, as JSON)."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                result = await self._async_nrf_import(user_input[CONF_NRF_JSON])
+            except NrfImportError as err:
+                errors["base"] = "no_address" if err.reason == "no_address" else f"nrf_{err.reason}"
+            else:
+                if not isinstance(result, NrfImport):
+                    return result
+                return await self._async_create_nrf_entry(result)
+        schema = vol.Schema(
+            {vol.Required(CONF_NRF_JSON): TextSelector(TextSelectorConfig(multiline=True))}
+        )
+        return self.async_show_form(step_id="nrf_import", data_schema=schema, errors=errors)
+
+    async def _async_nrf_import(self, text: str) -> NrfImport | ConfigFlowResult:
+        probe = import_nrf_json(text)
+        network_id = NetworkKeys.from_net_key(probe.net_key).network_id.hex()
+        existing, self._ignored = self._network_entry(network_id)
+        if existing is not None:
+            return self.async_abort(reason="already_configured")
+        await self.async_set_unique_id(network_id, raise_on_progress=False)
+        used = await AddressBook(self.hass).async_used(network_id)
+        return import_nrf_json(text, used_addresses=used)
+
+    async def _async_create_nrf_entry(self, result: NrfImport) -> ConfigFlowResult:
+        network_id = NetworkKeys.from_net_key(result.net_key).network_id.hex()
+        if not await self._async_reserve_address(
+            network_id, result.address
+        ) or not await self._async_reserve_nodes(network_id, result.occupied):
+            return self.async_abort(reason="cannot_save")
+        await self._async_clear_ignored(self._ignored)
+        if result.skipped:
+            _LOGGER.warning(
+                "%s: %d nodes were not imported (excluded, no device key, or no on/off or "
+                "light model)",
+                result.title,
+                result.skipped,
+            )
+        return self.async_create_entry(
+            title=result.title,
+            data=network_data(
+                result.title,
+                result.net_key,
+                result.app_key,
+                result.address,
+                iv_index=result.iv_index,
+                net_key_index=result.net_key_index,
+                app_key_index=result.app_key_index,
+                range_low=result.range_low,
+                range_high=result.range_high,
+            ),
+            options=dict(DEFAULT_OPTIONS),
+            subentries=[nrf_subentry(nrf_node) for nrf_node in result.nodes],
+        )
 
     async def async_step_tuya_import(
         self, user_input: dict[str, Any] | None = None
@@ -241,9 +405,12 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(
                 reason="network_gone" if existing is None else "already_configured"
             )
+        block = [(node_import.node.unicast, node_import.node.element_count)]
         if existing is not None:
             if (reason := self._join_conflict(existing, node_import)) is not None:
                 return self.async_abort(reason=reason)
+            if not await self._async_reserve_nodes(network_id, block):
+                return self.async_abort(reason="cannot_save")
             self.hass.config_entries.async_add_subentry(
                 existing,
                 ConfigSubentry(
@@ -255,33 +422,21 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             await self._async_disable_old()
             return self.async_abort(reason="node_added")
-        try:
-            await AddressBook(self.hass).async_add(network_id, node_import.address)
-        except (HomeAssistantError, OSError):
-            _LOGGER.exception("Could not save the provisioner address book")
+        if not await self._async_reserve_address(
+            network_id, node_import.address
+        ) or not await self._async_reserve_nodes(network_id, block):
             return self.async_abort(reason="cannot_save")
-        if ignored is not None:
-            # HA skips async_on_create_entry when it replaces an ignored entry, so clear it
-            # ourselves; an ignored entry holds no state.
-            with contextlib.suppress(UnknownEntry):  # the user removed it meanwhile
-                await self.hass.config_entries.async_remove(ignored.entry_id)
+        await self._async_clear_ignored(ignored)
         return self.async_create_entry(
             title=self._name,
-            data={
-                CONF_NAME: self._name,
-                CONF_NET_KEY: node_import.net_key.hex(),
-                CONF_NET_KEY_INDEX: 0,
-                CONF_APP_KEY: node_import.app_key.hex(),
-                CONF_APP_KEY_INDEX: 0,
-                CONF_ADDRESS: node_import.address,
-                CONF_RANGE_LOW: NODE_RANGE_LOW,
-                CONF_RANGE_HIGH: NODE_RANGE_HIGH,
-                CONF_IV_INDEX: node_import.iv_index,
-            },
-            options={
-                CONF_IDLE_TIMEOUT: DEFAULT_IDLE_TIMEOUT,
-                CONF_PUBLISH_SETUP: DEFAULT_PUBLISH_SETUP,
-            },
+            data=network_data(
+                self._name,
+                node_import.net_key,
+                node_import.app_key,
+                node_import.address,
+                iv_index=node_import.iv_index,
+            ),
+            options=dict(DEFAULT_OPTIONS),
             subentries=[
                 {
                     "subentry_type": SUBENTRY_NODE,

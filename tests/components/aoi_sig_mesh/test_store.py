@@ -175,3 +175,12 @@ async def test_a_full_range_reserves_nothing(hass: HomeAssistant) -> None:
         await book.async_reserve_node("aa" * 8, 2, taken=[(2, 1)], low=2, high=3)
 
     assert await book.async_used_nodes("aa" * 8) == []
+
+
+async def test_imported_node_blocks_are_merged_and_then_skipped(hass: HomeAssistant) -> None:
+    book = AddressBook(hass)
+    await book.async_add_nodes("aa" * 8, [(0x0002, 2), (0x0005, 1)])
+    await book.async_add_nodes("aa" * 8, [(0x0002, 2), (0x0007, 1)])
+
+    assert await book.async_used_nodes("aa" * 8) == [(0x0002, 2), (0x0005, 1), (0x0007, 1)]
+    assert await book.async_reserve_node("aa" * 8, 1, taken=[], low=2, high=0x10) == 0x0004

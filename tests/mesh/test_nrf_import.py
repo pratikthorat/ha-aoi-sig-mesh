@@ -113,6 +113,8 @@ def test_imports_keys_nodes_and_a_fresh_address():
     assert plug.node.models == {"onoff": 4}
     assert plug.configured is False  # OnOff not bound yet: first connect sets it up
     assert all(n.mac is None for n in result.nodes)
+    # the phone and every device hold their addresses, imported or not
+    assert result.occupied == [(0x0001, 1), (0x0002, 2), (0x0004, 1)]
 
 
 def test_keys_never_show_in_repr():
@@ -134,6 +136,8 @@ def test_our_address_avoids_every_provisioner_range_node_exclusion_and_known_add
     data["networkExclusions"] = [{"ivIndex": 0, "addresses": ["7F81"]}]
     result = load(data, used_addresses=[(0x7F82, 1)])
     assert result.address == 0x7F83
+    assert (0x7F80, 1) in result.occupied and (0x7F81, 1) in result.occupied
+    assert (0x7F82, 1) not in result.occupied  # our own old address is not a device
     # devices we add go in the largest gap no provisioner owns
     assert (result.range_low, result.range_high) == (0x199B, 0x7EFF)
 

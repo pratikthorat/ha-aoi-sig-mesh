@@ -245,6 +245,9 @@ class NrfImport:
     range_high: int
     nodes: list[NrfNode]
     skipped: int  # nodes left out: excluded, no DevKey, or nothing we can drive
+    # (start, count) of every node in the export, imported or not, and every excluded address:
+    # none of them may be given to a device we add.
+    occupied: list[tuple[int, int]] = field(default_factory=list)
 
 
 def _nrf_list(data: Mapping[str, Any], name: str) -> list[Any]:
@@ -435,12 +438,12 @@ def import_nrf_json(text: str, *, used_addresses: Iterable[tuple[int, int]] = ()
             ranges.append((low, high - low + 1))
     provisioner_uuids.discard("")
 
-    taken: list[tuple[int, int]] = [*ranges, *used_addresses]
+    occupied: list[tuple[int, int]] = []
     nodes: list[NrfNode] = []
     skipped = 0
     for raw in _nrf_list(data, "nodes"):
         unicast, count, node = _nrf_node(raw, app_key_index, provisioner_uuids)
-        taken.append((unicast, count))
+        occupied.append((unicast, count))
         if node is not None:
             nodes.append(node)
         elif str(raw.get("UUID", "")).upper() not in provisioner_uuids:
@@ -453,10 +456,11 @@ def import_nrf_json(text: str, *, used_addresses: Iterable[tuple[int, int]] = ()
             raise NrfImportError("bad_json", "addresses of a networkExclusions entry is not a list")
         for value in addresses:
             try:
-                taken.append((_nrf_unicast(value, "an excluded address"), 1))
+                occupied.append((_nrf_unicast(value, "an excluded address"), 1))
             except NrfImportError:
                 continue  # group or malformed entries do not block a unicast
 
+    taken = [*ranges, *occupied, *used_addresses]
     try:
         address = allocate_unicast(taken, 1, low=PROVISIONER_LOW, high=PROVISIONER_HIGH)
     except MeshError:
@@ -481,4 +485,5 @@ def import_nrf_json(text: str, *, used_addresses: Iterable[tuple[int, int]] = ()
         range_high=range_high,
         nodes=nodes,
         skipped=skipped,
+        occupied=sorted(set(occupied)),
     )
