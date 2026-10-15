@@ -73,6 +73,19 @@ def test_an_iv_jump_never_goes_backwards():
     assert saved == []
 
 
+def test_an_iv_jump_must_raise_the_transmit_iv_index():
+    net, saved = network(iv_index=5, seq=500)
+    before = net.persistent_state()
+    # IV 6 In Progress still transmits with IV 5, so restarting seq would reuse (5, seq).
+    with pytest.raises(ValueError):
+        net.accept_iv_jump(beacon(6, iv_update=True))
+
+    assert (net.iv_index, net.iv_update, net.tx_iv_index) == (5, False, 5)
+    assert net.persistent_state() == before  # seq ceiling unchanged
+    assert saved == []
+    assert net.next_seq() == 500
+
+
 def test_replay_drops_are_counted_and_logged_per_source(caplog):
     net, _ = network()
     caplog.set_level(logging.DEBUG, logger="mesh.network")

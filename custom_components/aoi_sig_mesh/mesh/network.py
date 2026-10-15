@@ -240,12 +240,17 @@ class MeshNetwork:
     def accept_iv_jump(self, beacon: SecureBeacon) -> None:
         """Adopt a verified beacon's IV index after the user confirmed a TOO_FAR jump.
 
-        Seq restarts from zero: the new transmit IV index has never been used by us. The
-        block is reserved here, so with an async store the caller awaits the save (and
+        Raises ``ValueError`` unless the beacon's transmit IV index is higher than ours:
+        seq restarts from zero, which is safe only on a transmit IV index we have never
+        used. (IV N+1 In Progress still transmits with N, so it is refused from Normal N.)
+        The block is reserved here, so with an async store the caller awaits the save (and
         ``mark_persisted``) before sending.
         """
-        if beacon.iv_index <= self._iv_index:
-            raise ValueError(f"IV index {beacon.iv_index} is not ahead of ours ({self._iv_index})")
+        new_tx = _tx_iv_index(beacon.iv_index, beacon.iv_update)
+        if new_tx <= self.tx_iv_index:
+            raise ValueError(
+                f"transmit IV index {new_tx} is not ahead of ours ({self.tx_iv_index})"
+            )
         self._iv_index = beacon.iv_index
         self._iv_update = beacon.iv_update
         self._reset_seq()
