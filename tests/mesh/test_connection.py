@@ -1,4 +1,6 @@
 import asyncio
+import dataclasses
+import time
 
 import pytest
 
@@ -19,6 +21,7 @@ def fast(monkeypatch):
     monkeypatch.setattr(proxy, "FILTER_TIMEOUT", 0.1)
     monkeypatch.setattr(connection, "BACKOFF_MIN", 0.05)
     monkeypatch.setattr(connection, "BACKOFF_MAX", 0.4)
+    monkeypatch.setattr(connection, "ADVERT_WAKE_MIN", 0.05)
 
 
 class Harness:
@@ -163,9 +166,9 @@ def test_an_advert_storm_does_not_defeat_the_backoff():
             h.radio.advertise()
             await asyncio.sleep(0.005)
         elapsed = asyncio.get_running_loop().time() - started
-        # A failed proxy's adverts wake the loop at most once per BACKOFF_MIN (0.05 s here),
-        # plus the first attempt and one in flight: a storm-driven loop would show ~60.
-        assert len(h.radio.connects) <= elapsed / connection.BACKOFF_MIN + 2
+        # A failed proxy's adverts wake the loop at most once per ADVERT_WAKE_MIN (0.05 s
+        # here), plus the first attempt and one in flight: a storm-driven loop would show ~60.
+        assert len(h.radio.connects) <= elapsed / connection.ADVERT_WAKE_MIN + 2
         await h.manager.stop()
 
     run(scenario())
@@ -176,6 +179,7 @@ def test_a_tried_proxy_that_advertises_again_after_the_failure_wakes_the_loop(mo
 
     async def scenario():
         monkeypatch.setattr(connection, "BACKOFF_MIN", 30.0)
+        monkeypatch.setattr(connection, "ADVERT_WAKE_MIN", 30.0)  # the first wake is immediate
         h = Harness()
         h.radio.advertise()
         h.radio.fail_connects = 1
@@ -190,21 +194,58 @@ def test_a_tried_proxy_that_advertises_again_after_the_failure_wakes_the_loop(mo
     run(scenario())
 
 
-def test_a_tried_proxys_adverts_wake_the_loop_at_most_once_per_backoff_min(monkeypatch):
+def test_a_tried_proxys_adverts_wake_the_loop_at_most_once_per_advert_wake_min(monkeypatch):
+    """Spaced by ADVERT_WAKE_MIN, not BACKOFF_MIN: a proxy that advertises but cannot be
+    connected would otherwise be retried every BACKOFF_MIN instead of backing off."""
+
     async def scenario():
-        monkeypatch.setattr(connection, "BACKOFF_MIN", 30.0)
+        monkeypatch.setattr(connection, "BACKOFF_MIN", 0.5)
+        monkeypatch.setattr(connection, "BACKOFF_MAX", 30.0)
+        monkeypatch.setattr(connection, "ADVERT_WAKE_MIN", 30.0)
         h = Harness()
         h.radio.advertise()
         h.radio.fail_connects = 1000
         h.manager.start()
         await h.until(lambda: len(h.radio.connects) == 1)
         await asyncio.sleep(0.05)
-        h.radio.advertise()
-        await h.until(lambda: len(h.radio.connects) == 2, timeout=1.0)
-        for _ in range(20):
-            await asyncio.sleep(0.01)
-            h.radio.advertise()  # newer than the second failure, but inside BACKOFF_MIN
+        h.radio.advertise()  # the first wake after the failure: immediate
+        await h.until(lambda: len(h.radio.connects) == 2, timeout=0.4)
+        # The loop now sleeps its 1 s backoff. Adverts for 0.7 s, past BACKOFF_MIN since that
+        # wake: none of them may wake it.
+        for _ in range(35):
+            await asyncio.sleep(0.02)
+            h.radio.advertise()
         assert len(h.radio.connects) == 2
+        await h.manager.stop()
+
+    run(scenario())
+
+
+def test_an_advert_heard_during_the_failing_round_does_not_cut_the_backoff(monkeypatch):
+    """Only an advert newer than the failure says the proxy came back."""
+
+    async def scenario():
+        monkeypatch.setattr(connection, "BACKOFF_MIN", 30.0)
+        monkeypatch.setattr(connection, "ADVERT_WAKE_MIN", 0.0)
+        h = Harness()
+        h.radio.advertise()
+        h.radio.fail_connects = 1000
+        heard = []
+        real_connect = h.radio.connect
+
+        async def connect(address):
+            # Heard while this round is still trying; delivered once it has failed.
+            heard.append(dataclasses.replace(h.radio.adverts[address], seen=time.monotonic()))
+            return await real_connect(address)
+
+        h.radio.connect = connect
+        h.manager.start()
+        await h.until(lambda: len(h.radio.connects) == 1)
+        await asyncio.sleep(0.05)  # the round has failed
+        for callback in list(h.radio._callbacks):
+            callback(heard[0])
+        await asyncio.sleep(0.2)
+        assert len(h.radio.connects) == 1
         await h.manager.stop()
 
     run(scenario())

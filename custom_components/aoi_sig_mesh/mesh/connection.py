@@ -25,6 +25,9 @@ _LOGGER = logging.getLogger(__name__)
 # Read at call time, so tests can shorten them with monkeypatch.
 BACKOFF_MIN = 2.0
 BACKOFF_MAX = 60.0
+# A tried proxy's adverts wake the loop at most this often, so one that advertises but cannot
+# be connected still backs off. The first wake after a failure is immediate.
+ADVERT_WAKE_MIN = 15.0
 CONNECT_TIMEOUT = 60.0
 CLOSE_TIMEOUT = 5.0
 
@@ -354,13 +357,14 @@ class ConnectionManager:
             return
         # A proxy that failed and advertises again (say, the bulb is back after a wall
         # power-cycle) is worth a retry before the backoff runs out. At most once per
-        # BACKOFF_MIN, so a storm of adverts from a proxy that keeps failing cannot defeat it.
+        # ADVERT_WAKE_MIN, so a storm of adverts from a proxy that keeps failing cannot defeat
+        # it. Only adverts newer than the failure count: one heard mid-round says nothing new.
         failed_at = self._failed_at
         now = time.monotonic()
         if (
             failed_at is not None
             and candidate.seen > failed_at
-            and now - self._advert_woke_at >= BACKOFF_MIN
+            and now - self._advert_woke_at >= ADVERT_WAKE_MIN
         ):
             self._advert_woke_at = now
             self._wake.set()

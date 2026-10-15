@@ -9,6 +9,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 
+from .config_flow import give_back_entity_ids
 from .const import (
     DOMAIN,
     ISSUE_IV_INDEX_JUMP,
@@ -61,7 +62,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> None:
-    """Deleting the network deletes its state, TIDs and issues; the address book keeps its own."""
+    """Deleting the network deletes its state, TIDs and issues; the address book keeps its own.
+
+    Entity ids taken over from tuya_ble_mesh go back to its entities.
+    """
+    give_back_entity_ids(hass, entry.entry_id)
     for issue in (ISSUE_IV_INDEX_JUMP, ISSUE_KEYS_REJECTED, ISSUE_NO_PROXY, ISSUE_NODE_UNREADABLE):
         ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)  # the TID counters

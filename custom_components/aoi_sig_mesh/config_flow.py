@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from types import MappingProxyType
 from typing import Any
 
@@ -21,7 +22,7 @@ from homeassistant.config_entries import (
     SubentryFlowResult,
     UnknownEntry,
 )
-from homeassistant.const import Platform
+from homeassistant.const import ATTR_RESTORED, Platform
 from homeassistant.core import HomeAssistant, callback, split_entity_id
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
@@ -332,6 +333,14 @@ def take_over_entity_ids(hass: HomeAssistant, source_entry_id: str, entry_id: st
         if len(mine) != 1 or len(old) != 1:
             continue  # nothing to swap with, or no telling which goes with which
         new, wanted = mine[0], old[0].entity_id
+        state = hass.states.get(wanted)
+        if state is not None and not state.attributes.get(ATTR_RESTORED):
+            # The old entity is still live (its entry did not unload): the id would not come
+            # free, so neither rename could finish and both would be stranded off it.
+            _LOGGER.warning(
+                "Not giving %s the id %s: the old entity is still loaded", new.entity_id, wanted
+            )
+            continue
         try:
             moved = registry.async_get_available_entity_id(
                 domain, f"{split_entity_id(wanted)[1]}_{TUYA_DOMAIN}"
@@ -346,6 +355,43 @@ def take_over_entity_ids(hass: HomeAssistant, source_entry_id: str, entry_id: st
             _LOGGER.warning("Could not give %s the id %s: %s", new.entity_id, wanted, err)
         else:
             _LOGGER.info("%s is now %s; the old entity is %s", new.entity_id, wanted, moved)
+
+
+@callback
+def give_back_entity_ids(hass: HomeAssistant, entry_id: str) -> None:
+    """Undo ``take_over_entity_ids`` as the network is deleted.
+
+    Our entities are unloaded but still registered: each steps aside, then the old entity it
+    displaced (``<id>_tuya_ble_mesh`` or ``<id>_tuya_ble_mesh_<n>``, from tuya_ble_mesh)
+    gets the id back. HA then deletes ours by config entry, whatever their id. Best effort:
+    a registry error is logged and the delete goes on.
+    """
+    registry = er.async_get(hass)
+    for entity in er.async_entries_for_config_entry(registry, entry_id):
+        if entity.platform != DOMAIN or entity.domain not in SWAPPED_DOMAINS:
+            continue
+        wanted = entity.entity_id
+        aside = re.compile(rf"{re.escape(wanted)}_{TUYA_DOMAIN}(_\d+)?")
+        old = [
+            e
+            for e in registry.entities.values()
+            if e.platform == TUYA_DOMAIN and aside.fullmatch(e.entity_id)
+        ]
+        if len(old) != 1:
+            continue  # never swapped, renamed since, or no telling which one it was
+        moved = old[0].entity_id
+        try:
+            registry.async_update_entity(
+                wanted,
+                new_entity_id=registry.async_get_available_entity_id(
+                    entity.domain, f"{split_entity_id(wanted)[1]}_{DOMAIN}"
+                ),
+            )
+            registry.async_update_entity(moved, new_entity_id=wanted)
+        except Exception as err:  # the delete goes on: never fail it over a name
+            _LOGGER.warning("Could not give %s back the id %s: %s", moved, wanted, err)
+        else:
+            _LOGGER.info("%s has its id %s back", moved, wanted)
 
 
 class AoiSigMeshOptionsFlow(OptionsFlow):

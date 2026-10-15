@@ -798,10 +798,14 @@ class MeshCoordinator:
         action: Callable[[NodeCommands], Awaitable[None]],
         before: NodeState | None = None,
         generation: int = 0,
+        *,
+        count_miss: bool = True,
     ) -> None:
         """Run ``action``; on failure revert to ``before`` and raise a translated error.
 
         ``before`` and ``generation`` come from ``_begin``; without them nothing is reverted.
+        With ``count_miss`` off, a timeout is not one of the misses that mark a node
+        unavailable.
         """
         try:
             if (link := await self._async_command_link()) is None:
@@ -821,7 +825,8 @@ class MeshCoordinator:
             raise self._error(record, "seq_not_saved") from err
         except MeshTimeout as err:  # before MeshError: an unanswered command counts as a miss
             self._revert(record, before, generation)
-            self._failed(record)
+            if count_miss:
+                self._failed(record)
             raise self._error(record, "command_failed") from err
         except LinkClosedError as err:  # no link, or it dropped: not the node's fault
             self._revert(record, before, generation)
@@ -957,8 +962,10 @@ class MeshCoordinator:
     async def async_identify(self, subentry_id: str) -> None:
         record = self.nodes[subentry_id]
         currently_on = bool(record.confirmed.on)  # the blinks end where the node really is
+        # Its only timeout is a plug's Health Attention, which an unbound Health Server drops
+        # silently: that says nothing about whether the node is reachable.
         await self._async_command(
-            record, lambda commands: commands.identify(currently_on=currently_on)
+            record, lambda commands: commands.identify(currently_on=currently_on), count_miss=False
         )
 
     @callback

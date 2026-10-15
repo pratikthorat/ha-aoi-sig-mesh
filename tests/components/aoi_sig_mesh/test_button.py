@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
 from homeassistant.components.button import SERVICE_PRESS
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
+from custom_components.aoi_sig_mesh.coordinator import FAILURES_UNAVAILABLE, MeshCoordinator
 from custom_components.aoi_sig_mesh.mesh import control
 from custom_components.aoi_sig_mesh.mesh.control import BLINKS
 from custom_components.aoi_sig_mesh.mesh.models import OP_ONOFF_SET, OP_ONOFF_SET_UNACK
@@ -60,6 +62,32 @@ async def test_a_light_whose_health_is_not_bound_blinks_instead(
         assert lamp.attention == 0
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_an_unanswered_identify_on_a_plug_does_not_count_toward_unavailable(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    """An unbound Health Server drops Attention silently: that says nothing of the link."""
+    plug = sim.add_node("onoff", unicast=0x00C0, health=True)
+    plug.bindings.discard((0x00C0, 0x0002))  # set up before Health was bound
+    radio.advertise(PLUG_MAC)
+    entry = make_entry(("Kitchen plug", node_data(plug, mac=PLUG_MAC)))
+    with patch.object(control, "ATTENTION_TIMEOUT", 0.05):
+        coordinator = await setup_entry(hass, entry)
+        try:
+            record = next(iter(coordinator.nodes.values()))
+            await until(lambda: coordinator.connected and record.confirmed.on is not None)
+
+            for _ in range(FAILURES_UNAVAILABLE):
+                with pytest.raises(HomeAssistantError) as err:
+                    await press(hass, "button.kitchen_plug_identify")
+                assert err.value.translation_key == "command_failed"
+
+            assert record.failures == 0
+            assert record.available
+            assert plug.on is False  # never toggled
+        finally:
+            await hass.config_entries.async_unload(entry.entry_id)
 
 
 async def test_reconnect_opens_a_new_connection(

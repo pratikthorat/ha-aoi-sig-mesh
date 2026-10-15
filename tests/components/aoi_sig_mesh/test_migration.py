@@ -122,4 +122,9 @@ async def test_the_bulb_migrates_and_works(
     sim.local_change(bulb, False, dst=OURS)  # the wall switch, published to us
     await until(lambda: hass.states.get(LAMP).state == "off")
     assert made == [first, entry.runtime_data]  # set up, then reloaded exactly once
-    await hass.config_entries.async_unload(entry.entry_id)
+
+    # Rollback: deleting our network hands light.mesh_cw back to the fork's light.
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert registry.async_get(fork.id).entity_id == LAMP
+    assert registry.async_get_entity_id(LIGHT_DOMAIN, DOMAIN, f"{NETWORK_ID}_00b0_light") is None
