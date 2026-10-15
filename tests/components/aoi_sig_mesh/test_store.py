@@ -7,7 +7,9 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.helpers.storage import Store
+from homeassistant.util.file import WriteError
 
 from custom_components.aoi_sig_mesh.store import AddressBook, NetworkStore, StateSaver
 
@@ -52,25 +54,63 @@ async def test_saves_land_in_order_and_each_is_confirmed_after_its_write(
     assert hass_storage[KEY]["data"]["seq"] == 128
 
 
-async def test_a_failed_write_is_never_confirmed_and_is_reported(
-    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+async def test_a_failed_disk_write_is_never_confirmed_and_is_reported(
+    hass: HomeAssistant, hass_storage: dict[str, Any], caplog: pytest.LogCaptureFixture
 ) -> None:
     confirmed: list[dict[str, Any]] = []
+    failures: list[bool] = []
+
+    async def disk_full(self: Store, data: dict[str, Any]) -> None:
+        raise WriteError(OSError(28, "No space left on device"))
+
+    saver = StateSaver(
+        hass, NetworkStore(hass, "entry1"), confirmed.append, lambda: failures.append(True)
+    )
+    with patch.object(Store, "_async_write_data", disk_full):
+        saver.save(STATE)
+        await saver.async_flush()
+
+    assert confirmed == []
+    assert failures == [True]
+    assert KEY not in hass_storage
+    assert "Saving the mesh state failed" in caplog.text
+
+
+async def test_a_save_while_stopping_is_written_before_it_is_confirmed(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    on_disk_at_confirm: list[bool] = []
+
+    saver = StateSaver(
+        hass,
+        NetworkStore(hass, "entry1"),
+        lambda data: on_disk_at_confirm.append(hass_storage.get(KEY, {}).get("data") == data),
+        lambda: None,
+    )
+    hass.set_state(CoreState.stopping)
+    try:
+        saver.save(STATE)
+        await saver.async_flush()
+    finally:
+        hass.set_state(CoreState.running)
+
+    assert on_disk_at_confirm == [True]
+
+
+async def test_a_write_never_runs_inside_save(hass: HomeAssistant) -> None:
     failures: list[bool] = []
 
     async def broken(self: NetworkStore, data: dict[str, Any]) -> None:
         raise OSError("disk full")
 
     saver = StateSaver(
-        hass, NetworkStore(hass, "entry1"), confirmed.append, lambda: failures.append(True)
+        hass, NetworkStore(hass, "entry1"), lambda data: None, lambda: failures.append(True)
     )
     with patch.object(NetworkStore, "async_save", broken):
         saver.save(STATE)
+        assert failures == []  # on_failed must not be re-entrant into the caller
         await saver.async_flush()
-
-    assert confirmed == []
     assert failures == [True]
-    assert "Saving the mesh state failed" in caplog.text
 
 
 async def test_remove_deletes_the_state(hass: HomeAssistant, hass_storage: dict[str, Any]) -> None:
@@ -89,3 +129,13 @@ async def test_address_book_remembers_addresses_per_network(hass: HomeAssistant)
 
     assert await AddressBook(hass).async_used("aa" * 8) == [(0x7F00, 1), (0x7F01, 1)]
     assert await AddressBook(hass).async_used("bb" * 8) == []
+
+
+async def test_concurrent_address_adds_are_not_lost(hass: HomeAssistant) -> None:
+    await asyncio.gather(
+        AddressBook(hass).async_add("aa" * 8, 0x7F00),
+        AddressBook(hass).async_add("aa" * 8, 0x7F01),
+        AddressBook(hass).async_add("aa" * 8, 0x7F02),
+    )
+
+    assert await AddressBook(hass).async_used("aa" * 8) == [(0x7F00, 1), (0x7F01, 1), (0x7F02, 1)]
