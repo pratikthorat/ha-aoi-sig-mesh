@@ -93,7 +93,9 @@ from .provision import (
     async_entry_iv,
     async_provision_device,
     async_unprovisioned,
+    claim_device,
     entry_taken,
+    release_device,
 )
 from .store import AddressBook
 
@@ -650,9 +652,20 @@ class NodeSubentryFlow(ConfigSubentryFlow):
             return await self.async_step_provision()
         devices = async_unprovisioned(self.hass)
         if not devices:
+            if failure is not None:  # the real reason, not "nothing in range"
+                return self.async_abort(
+                    reason=failure.reason,
+                    description_placeholders={"step": failure.step, "detail": failure.detail},
+                )
             return self.async_abort(reason="no_devices")
         self._devices = {device.address: device for device in devices}
-        default = self._device.address if self._device in devices else devices[0].address
+        addresses = [device.address for device in devices]
+        # match by address: the signal strength changes between scans
+        default = (
+            self._device.address
+            if self._device and self._device.address in addresses
+            else addresses[0]
+        )
         schema = vol.Schema(
             {
                 vol.Required(CONF_DEVICE, default=default): SelectSelector(
@@ -681,9 +694,15 @@ class NodeSubentryFlow(ConfigSubentryFlow):
         """Give the device the network's keys and an address of its own (PB-GATT)."""
         assert self._device is not None
         if self._task is None:
+            address = self._device.address
+            if not claim_device(self.hass, address):
+                self._failure = ProvisionFailed("already_provisioning", "", "")
+                return await self.async_step_user()
             self._task = self.hass.async_create_task(
                 self._async_provision(self._device), "aoi_sig_mesh provisioning"
             )
+            # runs on success, failure and cancel (the dialog was closed)
+            self._task.add_done_callback(lambda _task: release_device(self.hass, address))
         if not self._task.done():
             return self.async_show_progress(
                 step_id="provision",
@@ -698,6 +717,10 @@ class NodeSubentryFlow(ConfigSubentryFlow):
             self._failure = err
             if err.reason == "half_provisioned":
                 return self.async_show_progress_done(next_step_id="half_provisioned")
+            return self.async_show_progress_done(next_step_id="user")
+        except Exception as err:  # noqa: BLE001 - never leave the dialog spinning
+            _LOGGER.exception("Adding %s failed unexpectedly", self._device.address)
+            self._failure = ProvisionFailed("unknown", "", type(err).__name__)
             return self.async_show_progress_done(next_step_id="user")
         return self.async_show_progress_done(next_step_id="finish")
 

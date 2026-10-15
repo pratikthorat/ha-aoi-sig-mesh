@@ -117,6 +117,13 @@
       "abort": {
         "no_devices": "No factory-reset device is in range. Reset the device (see its manual), keep it close to Home Assistant or a Bluetooth proxy and try again.",
         "half_provisioned": "{name} took the network's keys but did not confirm at the {step} step, so its state is unknown. Factory-reset it and add it again; its old address stays reserved.",
+        "provision_failed": "The device stopped answering at the {step} step ({detail}) and is no longer in range. Move it closer and try again.",
+        "provision_failed_remote": "The device stopped answering at the {step} step ({detail}) through an ESPHome Bluetooth proxy and is no longer in range. Try again with it close to Home Assistant's own Bluetooth adapter.",
+        "oob_required": "This device needs a code (OOB authentication) to join, which this integration does not support yet.",
+        "no_address": "This network has no free address left for the device.",
+        "cannot_save": "The device's address could not be saved ({detail}), so nothing was sent to the device. Check the Home Assistant log for disk errors and try again.",
+        "unknown": "Something unexpected went wrong while adding the device. Check the Home Assistant log and try again.",
+        "already_provisioning": "That device is already being added in another window.",
         "reconfigure_successful": "The device type was changed."
       },
       "progress": {
@@ -127,7 +134,9 @@
         "provision_failed_remote": "The device stopped answering at the {step} step ({detail}) through an ESPHome Bluetooth proxy. Try again with the device close to Home Assistant's own Bluetooth adapter.",
         "oob_required": "This device needs a code (OOB authentication) to join, which this integration does not support yet.",
         "no_address": "This network has no free address left for the device.",
-        "cannot_save": "The device's address could not be saved ({detail}), so nothing was sent to the device. Check the Home Assistant log for disk errors and try again."
+        "cannot_save": "The device's address could not be saved ({detail}), so nothing was sent to the device. Check the Home Assistant log for disk errors and try again.",
+        "unknown": "Something unexpected went wrong while adding the device. Check the Home Assistant log and try again.",
+        "already_provisioning": "That device is already being added in another window."
       }
     }
   },

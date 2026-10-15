@@ -11,8 +11,10 @@ from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
-from custom_components.aoi_sig_mesh.const import SUBENTRY_NODE
+from custom_components.aoi_sig_mesh import config_flow
+from custom_components.aoi_sig_mesh.const import DOMAIN, SUBENTRY_NODE
 from custom_components.aoi_sig_mesh.mesh import provisioner
+from custom_components.aoi_sig_mesh.mesh.errors import MeshError
 from custom_components.aoi_sig_mesh.store import AddressBook, NetworkStore
 from tests.sim.mesh_sim import SimMesh
 from tests.sim.prov_sim import SimUnprovisioned
@@ -145,6 +147,7 @@ async def test_a_failure_goes_back_to_the_form_with_the_step(
     assert (result["type"], result["step_id"]) == (FlowResultType.FORM, "user")
     assert result["errors"] == {"base": error}
     assert result["description_placeholders"]["step"] == step
+    assert result["description_placeholders"]["detail"]  # never an empty reason
     assert len(bulb_entry.subentries) == 1
     assert 0x0002 not in sim.nodes
 
@@ -220,3 +223,113 @@ async def test_a_new_device_starts_with_a_clean_replay_entry(
     await until(lambda: bulb_entry.subentries[subentry.subentry_id].data["configured"])
     _iv, seq = bulb_entry.runtime_data.network.persistent_state()["replay"]["2"]
     assert seq < 5000  # the plug's own restarted seq
+
+
+async def pick(hass: HomeAssistant, flow_id: str, address: str) -> dict[str, Any]:
+    return await hass.config_entries.subentries.async_configure(
+        flow_id, {"device": address, "role": "auto"}
+    )
+
+
+async def test_a_full_range_reaches_the_form_as_no_address(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def full(*_args: Any, **_kwargs: Any) -> int:
+        raise MeshError("no free address")
+
+    monkeypatch.setattr(AddressBook, "async_reserve_node", full)
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, name="Plug"))
+
+    result = await add_device(hass, bulb_entry, PLUG_MAC)
+
+    assert (result["type"], result["step_id"]) == (FlowResultType.FORM, "user")
+    assert result["errors"] == {"base": "no_address"}
+    assert result["description_placeholders"]["detail"]
+
+
+async def test_an_unexpected_error_returns_to_the_form_as_unknown(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("surprise")
+
+    monkeypatch.setattr(config_flow, "async_provision_device", boom)
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, name="Plug"))
+
+    result = await open_add(hass, bulb_entry)
+    # the task fails at once (HA starts tasks eagerly), so there may be no progress to wait on
+    result = await pick(hass, result["flow_id"], PLUG_MAC)
+    await hass.async_block_till_done()
+    if result["type"] is FlowResultType.SHOW_PROGRESS:
+        result = await hass.config_entries.subentries.async_configure(result["flow_id"])
+
+    assert (result["type"], result["step_id"]) == (FlowResultType.FORM, "user")
+    assert result["errors"] == {"base": "unknown"}
+    assert hass.data[DOMAIN]["provisioning"] == set()
+
+
+async def test_a_failure_is_not_lost_when_the_device_is_gone(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any
+) -> None:
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, stall_at="public_key"))
+    result = await open_add(hass, bulb_entry)
+    result = await pick(hass, result["flow_id"], PLUG_MAC)
+    radio.forget(PLUG_MAC)  # it left while we waited
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"])
+
+    assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "provision_failed")
+    assert result["description_placeholders"]["step"] == "public_key"
+
+
+async def test_the_retry_form_keeps_the_same_device_when_its_signal_changes(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any
+) -> None:
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, stall_at="public_key"), rssi=-30)
+    radio.advertise_unprovisioned(SimUnprovisioned(LAMP_MAC), rssi=-40)
+    result = await open_add(hass, bulb_entry)
+    result = await pick(hass, result["flow_id"], PLUG_MAC)
+    await hass.async_block_till_done()
+    radio._unprovisioned[PLUG_MAC] = (radio._unprovisioned[PLUG_MAC][0], -70, False)
+
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"])
+
+    assert result["step_id"] == "user"
+    device_key = next(iter(result["data_schema"].schema))
+    assert device_key.default() == PLUG_MAC  # not the lamp, which is now the strongest
+
+
+async def test_a_device_being_added_in_another_window_is_refused(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provisioner, "PUBLIC_KEY_TIMEOUT", 30.0)
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, stall_at="public_key"))
+    first = await open_add(hass, bulb_entry)
+    first = await pick(hass, first["flow_id"], PLUG_MAC)
+    assert first["type"] is FlowResultType.SHOW_PROGRESS
+    second = await open_add(hass, bulb_entry)
+
+    second = await pick(hass, second["flow_id"], PLUG_MAC)
+
+    assert (second["type"], second["step_id"]) == (FlowResultType.FORM, "user")
+    assert second["errors"] == {"base": "already_provisioning"}
+    hass.config_entries.subentries.async_abort(first["flow_id"])
+    await hass.async_block_till_done()
+
+
+async def test_closing_the_dialog_cancels_provisioning_and_frees_the_device(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provisioner, "PUBLIC_KEY_TIMEOUT", 30.0)
+    device = SimUnprovisioned(PLUG_MAC, stall_at="public_key")
+    radio.advertise_unprovisioned(device)
+    result = await open_add(hass, bulb_entry)
+    result = await pick(hass, result["flow_id"], PLUG_MAC)
+    await until(lambda: radio.provisioning_connects)
+    assert hass.data[DOMAIN]["provisioning"] == {PLUG_MAC}
+
+    hass.config_entries.subentries.async_abort(result["flow_id"])
+
+    await until(lambda: not device._transport.is_connected)
+    await until(lambda: hass.data[DOMAIN]["provisioning"] == set())

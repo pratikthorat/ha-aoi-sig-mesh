@@ -17,6 +17,7 @@ from .const import (
     CONF_NET_KEY_INDEX,
     CONF_RANGE_HIGH,
     CONF_RANGE_LOW,
+    DOMAIN,
     SUBENTRY_NODE,
 )
 from .coordinator import claimed_range
@@ -54,6 +55,23 @@ class ProvisionFailed(Exception):
 def async_unprovisioned(hass: HomeAssistant) -> list[UnprovisionedDevice]:
     """Factory-reset nodes in range of any connectable adapter or proxy, strongest first."""
     return HaBluetoothRadio(hass).unprovisioned()
+
+
+def _busy(hass: HomeAssistant) -> set[str]:
+    return hass.data.setdefault(DOMAIN, {}).setdefault("provisioning", set())
+
+
+def claim_device(hass: HomeAssistant, address: str) -> bool:
+    """Mark ``address`` as being provisioned; False if another flow already is."""
+    busy = _busy(hass)
+    if address in busy:
+        return False
+    busy.add(address)
+    return True
+
+
+def release_device(hass: HomeAssistant, address: str) -> None:
+    _busy(hass).discard(address)
 
 
 def entry_taken(entry: ConfigEntry) -> list[tuple[int, int]]:
