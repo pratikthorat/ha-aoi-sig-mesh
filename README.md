@@ -13,6 +13,8 @@
 
 Control Bluetooth SIG Mesh lights and plugs from Home Assistant. Everything runs locally: there is no vendor hub, no cloud and no account. By Arena of Innovation.
 
+<img alt="Turning a Bluetooth SIG Mesh bulb on, dimming it and changing its colour temperature from Home Assistant" src="raw.githubusercontent.com/pratikthorat/…/demo.gif" width="600">
+
 - **On/off plugs** (Generic OnOff) become switches.
 - **Dimmable lights** (Light Lightness) become lights with brightness and transitions.
 - **Tunable-white lights** (Light CTL) also get colour temperature, within the range the light reports.
@@ -116,7 +118,7 @@ The mesh code is checked against the sample data in the Bluetooth Mesh specifica
 
 | What | Status |
 |---|---|
-| Tuya tunable-white bulb, moved from Tuya BLE Mesh | being checked by the author |
+| Tuya tunable-white bulb, moved from Tuya BLE Mesh | works: on/off, brightness, colour temperature |
 | On/off plugs | untested on hardware: reports welcome |
 | Adding a factory-reset device | untested on hardware: reports welcome |
 | nRF Mesh import | untested on hardware: reports welcome |
