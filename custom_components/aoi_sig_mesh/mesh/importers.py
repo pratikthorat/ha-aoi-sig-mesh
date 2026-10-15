@@ -339,9 +339,16 @@ def _nrf_node(
         index = element.get("index", position)
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < count:
             index = position
-        for model in element.get("models") or []:
+        element_models = element.get("models")
+        if element_models is None:
+            element_models = []
+        if not isinstance(element_models, list):
+            raise NrfImportError("bad_json", f"models of node 0x{unicast:04X} are not a list")
+        for model in element_models:
             if not isinstance(model, Mapping):
-                continue
+                raise NrfImportError(
+                    "bad_json", f"a model of node 0x{unicast:04X} is not an object"
+                )
             model_id = _nrf_hex_id(model.get("modelId"))
             if model_id is None or len(str(model.get("modelId"))) != 4:
                 continue  # vendor models (8 hex digits) are never ours to drive
@@ -413,13 +420,19 @@ def import_nrf_json(text: str, *, used_addresses: Iterable[tuple[int, int]] = ()
         if not isinstance(provisioner, Mapping):
             raise NrfImportError("bad_json", "a provisioner is not an object")
         provisioner_uuids.add(str(provisioner.get("UUID", "")).upper())
-        for rng in provisioner.get("allocatedUnicastRange") or []:
+        unicast_ranges = provisioner.get("allocatedUnicastRange")
+        if unicast_ranges is None:
+            unicast_ranges = []
+        if not isinstance(unicast_ranges, list):
+            raise NrfImportError("bad_json", "allocatedUnicastRange is not a list")
+        for rng in unicast_ranges:
             if not isinstance(rng, Mapping):
                 raise NrfImportError("bad_json", "a unicast range is not an object")
             low = _nrf_unicast(rng.get("lowAddress"), "lowAddress")
             high = _nrf_unicast(rng.get("highAddress"), "highAddress")
-            if low <= high:
-                ranges.append((low, high - low + 1))
+            if low > high:
+                raise NrfImportError("bad_address", "a unicast range ends before it starts")
+            ranges.append((low, high - low + 1))
     provisioner_uuids.discard("")
 
     taken: list[tuple[int, int]] = [*ranges, *used_addresses]
@@ -433,8 +446,12 @@ def import_nrf_json(text: str, *, used_addresses: Iterable[tuple[int, int]] = ()
         elif str(raw.get("UUID", "")).upper() not in provisioner_uuids:
             skipped += 1
     for exclusion in _nrf_list(data, "networkExclusions"):
-        addresses = exclusion.get("addresses", []) if isinstance(exclusion, Mapping) else []
-        for value in addresses if isinstance(addresses, list) else []:
+        if not isinstance(exclusion, Mapping):
+            raise NrfImportError("bad_json", "a networkExclusions entry is not an object")
+        addresses = exclusion.get("addresses", [])
+        if not isinstance(addresses, list):
+            raise NrfImportError("bad_json", "addresses of a networkExclusions entry is not a list")
+        for value in addresses:
             try:
                 taken.append((_nrf_unicast(value, "an excluded address"), 1))
             except NrfImportError:

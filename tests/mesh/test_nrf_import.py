@@ -223,3 +223,29 @@ def test_error_messages_never_carry_keys():
     with pytest.raises(NrfImportError) as caught:
         load(data)
     assert NET_KEY.hex()[:30] not in str(caught.value).lower()
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda d: d["nodes"][1]["elements"][0].update(models=5), "bad_json"),
+        (lambda d: d["nodes"][1]["elements"][0].update(models=["0000"]), "bad_json"),
+        (lambda d: d["provisioners"][0].update(allocatedUnicastRange=5), "bad_json"),
+        (lambda d: d["provisioners"][0].update(allocatedUnicastRange=["0001"]), "bad_json"),
+        (lambda d: d.update(networkExclusions=5), "bad_json"),
+        (lambda d: d.update(networkExclusions=[{"addresses": "7F81"}]), "bad_json"),
+        (lambda d: d.update(networkExclusions=[{"addresses": 5}]), "bad_json"),
+        (
+            lambda d: d["provisioners"][0]["allocatedUnicastRange"][0].update(
+                lowAddress="0010", highAddress="0001"
+            ),
+            "bad_address",
+        ),
+    ],
+)
+def test_malformed_shapes_raise_typed_errors(change, reason):
+    data = export()
+    change(data)
+    with pytest.raises(NrfImportError) as caught:
+        load(data)
+    assert caught.value.reason == reason
