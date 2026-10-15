@@ -7,7 +7,7 @@ src = [".", "custom_components/aoi_sig_mesh"]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["mesh", "tests"]
+known-first-party = ["custom_components", "mesh", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/mesh"]

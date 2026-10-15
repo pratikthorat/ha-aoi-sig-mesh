@@ -1,0 +1,99 @@
+"""strings.json is the source; en.json is a copy; every key the code uses exists."""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+PACKAGE = Path(__file__).resolve().parents[3] / "custom_components" / "aoi_sig_mesh"
+STRINGS = json.loads((PACKAGE / "strings.json").read_text())
+
+
+def placeholders(text: str) -> set[str]:
+    return set(re.findall(r"{(\w+)}", text))
+
+
+def test_english_translation_is_a_copy_of_strings() -> None:
+    assert json.loads((PACKAGE / "translations" / "en.json").read_text()) == STRINGS
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "config.step.user.menu_options.tuya_import",
+        "config.step.disable_old.data.disable_old",
+        "config.error.not_sig",
+        "config.error.bad_keys",
+        "config.error.bad_iv_index",
+        "config.error.bad_address",
+        "config.error.no_address",
+        "config.abort.already_configured",
+        "config.abort.no_import_source",
+        "config.abort.not_supported",
+        "config.abort.node_added",
+        "options.step.init.data.idle_timeout",
+        "options.step.init.data.publish_setup",
+        "config_subentries.node.initiate_flow.user",
+        "config_subentries.node.initiate_flow.reconfigure",
+        "config_subentries.node.step.reconfigure.data.role",
+        "config_subentries.node.abort.add_by_import",
+        "config_subentries.node.abort.reconfigure_successful",
+        "selector.role.options.light",
+        "selector.role.options.switch",
+        "entity.button.reconnect.name",
+        "entity.sensor.signal_strength.name",
+        "entity.sensor.connected_via.name",
+        "entity.sensor.last_seen.name",
+        "exceptions.not_connected.message",
+        "exceptions.command_failed.message",
+        "exceptions.seq_not_saved.message",
+        "issues.no_proxy.description",
+        "issues.keys_rejected.description",
+        "issues.node_unreadable.description",
+        "issues.iv_index_jump.title",
+        "issues.iv_index_jump.fix_flow.step.confirm.description",
+        "issues.iv_index_jump.fix_flow.abort.beacon_gone",
+    ],
+)
+def test_every_key_the_code_uses_exists(path: str) -> None:
+    node = STRINGS
+    for part in path.split("."):
+        node = node[part]
+    assert isinstance(node, str) and node
+
+
+@pytest.mark.parametrize(
+    ("issue", "expected"),
+    [
+        ("no_proxy", {"network", "minutes"}),
+        ("keys_rejected", {"network"}),
+        ("node_unreadable", {"network", "names"}),
+    ],
+)
+def test_issue_placeholders_match_what_the_coordinator_passes(
+    issue: str, expected: set[str]
+) -> None:
+    texts = STRINGS["issues"][issue]
+    assert placeholders(texts["title"] + texts["description"]) == expected
+
+
+def test_the_iv_index_jump_issue_is_a_fix_flow() -> None:
+    """hassfest: a fixable issue has a fix_flow and no description of its own."""
+    issue = STRINGS["issues"]["iv_index_jump"]
+    confirm = issue["fix_flow"]["step"]["confirm"]
+
+    assert "description" not in issue
+    assert placeholders(issue["title"]) == {"network"}
+    assert placeholders(confirm["title"] + confirm["description"]) == {
+        "network",
+        "ours",
+        "theirs",
+    }
+
+
+def test_exceptions_name_the_device() -> None:
+    for key in ("not_connected", "command_failed", "seq_not_saved"):
+        assert placeholders(STRINGS["exceptions"][key]["message"]) == {"name"}

@@ -1,0 +1,157 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a Bluetooth SIG Mesh network",
+        "description": "Choose where the network comes from.",
+        "menu_options": {
+          "tuya_import": "Import from Tuya BLE Mesh"
+        }
+      },
+      "tuya_import": {
+        "title": "Import from Tuya BLE Mesh",
+        "description": "Copies the keys and the device from a Tuya BLE Mesh SIG Mesh entry. The device keeps its pairing: nothing is reset.",
+        "data": {
+          "source_entry": "Tuya BLE Mesh entry",
+          "name": "Network name"
+        },
+        "data_description": {
+          "source_entry": "Only SIG Mesh entries can be imported.",
+          "name": "A device from a network you already have joins that network instead."
+        }
+      },
+      "disable_old": {
+        "title": "Disable the old entry?",
+        "description": "{old} and this integration would fight over the device's one Bluetooth connection. To go back later, enable {old} again and disable the new network.",
+        "data": {
+          "disable_old": "Disable the old entry"
+        }
+      }
+    },
+    "error": {
+      "not_sig": "Only SIG Mesh entries can be imported.",
+      "bad_keys": "The entry's keys are missing or invalid.",
+      "bad_iv_index": "The entry's IV index is missing or invalid.",
+      "bad_address": "The entry's device address is invalid.",
+      "no_address": "No free address is left for Home Assistant in this network."
+    },
+    "abort": {
+      "already_configured": "This network or device is already set up.",
+      "no_import_source": "There is nothing to import: no Tuya BLE Mesh SIG Mesh entry was found.",
+      "not_supported": "This Bluetooth device cannot be set up from discovery.",
+      "node_added": "The device was added to your existing network."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Network options",
+        "data": {
+          "idle_timeout": "Disconnect when idle",
+          "publish_setup": "Ask devices to report changes"
+        },
+        "data_description": {
+          "idle_timeout": "Minutes without commands before the Bluetooth connection is closed. 0 keeps it open, so changes made at the device show up at once.",
+          "publish_setup": "When a device is set up, point its status publication at Home Assistant."
+        }
+      }
+    }
+  },
+  "config_subentries": {
+    "node": {
+      "entry_type": "Device",
+      "initiate_flow": {
+        "user": "Add device",
+        "reconfigure": "Change device type"
+      },
+      "step": {
+        "reconfigure": {
+          "title": "Change device type",
+          "description": "Show the device as a light or as a switch.",
+          "data": {
+            "role": "Device type"
+          }
+        }
+      },
+      "abort": {
+        "add_by_import": "Add devices with Import from Tuya BLE Mesh on the integration page.",
+        "reconfigure_successful": "The device type was changed."
+      }
+    }
+  },
+  "selector": {
+    "role": {
+      "options": {
+        "light": "Light",
+        "switch": "Switch"
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "reconnect": {
+        "name": "Reconnect"
+      }
+    },
+    "sensor": {
+      "signal_strength": {
+        "name": "Signal strength",
+        "state_attributes": {
+          "age": {
+            "name": "Age"
+          }
+        }
+      },
+      "connected_via": {
+        "name": "Connected via",
+        "state_attributes": {
+          "address": {
+            "name": "Address"
+          }
+        }
+      },
+      "last_seen": {
+        "name": "Last seen"
+      }
+    }
+  },
+  "exceptions": {
+    "not_connected": {
+      "message": "Could not reach {name}: no mesh proxy is connected."
+    },
+    "command_failed": {
+      "message": "{name} did not confirm the command."
+    },
+    "seq_not_saved": {
+      "message": "Could not send to {name}: the mesh state could not be saved. Check the Home Assistant log for disk errors and try again."
+    }
+  },
+  "issues": {
+    "no_proxy": {
+      "title": "{network}: no mesh proxy in range",
+      "description": "Home Assistant has not reached any device of {network} for {minutes} minutes. Check that a device of the network is powered and within Bluetooth range of Home Assistant or of an ESPHome Bluetooth proxy with active connections enabled."
+    },
+    "keys_rejected": {
+      "title": "{network}: keys rejected",
+      "description": "Home Assistant connected to {network} but could not read anything it sent. The network was probably reset or set up again with another app. Remove the network and import it again."
+    },
+    "iv_index_jump": {
+      "title": "{network}: IV index jumped",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Adopt IV index {theirs}?",
+            "description": "The mesh announced IV index {theirs}, but Home Assistant is at {ours}. Jumps of more than one step are not applied on their own, so the devices of {network} may ignore commands until Home Assistant adopts the new IV index.\n\nAdopt it only if the network really moved on, for example after a long time switched off while the other devices kept running. The announcement was signed with the network key."
+          }
+        },
+        "abort": {
+          "beacon_gone": "There is no IV index jump to adopt any more. The network is set up again or the jump was already applied."
+        }
+      }
+    },
+    "node_unreadable": {
+      "title": "{network}: device data damaged",
+      "description": "The saved data of {names} in {network} could not be read, so these devices were skipped. Delete them from the network and import them again."
+    }
+  }
+}

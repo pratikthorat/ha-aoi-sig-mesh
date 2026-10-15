@@ -1,0 +1,17 @@
+{
+  "entity": {
+    "button": {
+      "reconnect": {
+        "default": "mdi:bluetooth-connect"
+      }
+    },
+    "sensor": {
+      "connected_via": {
+        "default": "mdi:access-point-network"
+      },
+      "last_seen": {
+        "default": "mdi:clock-check-outline"
+      }
+    }
+  }
+}

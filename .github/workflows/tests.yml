@@ -16,3 +16,18 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q
+
+  ha:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: >-
+          pip install homeassistant==2026.5.4
+          pytest-homeassistant-custom-component==0.13.333
+          aiousbwatcher==1.1.2 serialx==1.7.3 aioesphomeapi==44.24.1
+      - run: >-
+          python -m pytest -c tests/components/aoi_sig_mesh/pytest.ini
+          tests/components/aoi_sig_mesh -q -p no:cacheprovider
