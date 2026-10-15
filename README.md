@@ -117,4 +117,4 @@ The mesh protocol code started from [tuya-ble-mesh](https://github.com/11z4t/tuy
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

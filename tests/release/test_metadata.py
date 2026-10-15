@@ -76,7 +76,22 @@ def test_hacs_json() -> None:
     }
 
 
-def test_licence_keeps_the_credit() -> None:
-    text = (ROOT / "LICENSE").read_text()
-    assert text.startswith("MIT License")
+def test_licence_is_plain_mit_with_both_copyrights() -> None:
+    # GitHub, and so HACS, only recognises the licence when nothing but
+    # copyright lines differs from the MIT text. The credit lives in NOTICE.
+    lines = (ROOT / "LICENSE").read_text().splitlines()
+    assert lines[:4] == [
+        "MIT License",
+        "",
+        "Copyright (c) 2026 Pratik Thorat (Arena of Innovation)",
+        "Copyright (c) 11z4t and contributors",
+    ]
+    assert lines[4] == ""
+    assert lines[5].startswith("Permission is hereby granted, free of charge")
+    assert not [line for line in lines[5:] if "Copyright" in line or "http" in line]
+
+
+def test_notice_keeps_the_credit() -> None:
+    text = (ROOT / "NOTICE").read_text()
     assert "https://github.com/11z4t/tuya-ble-mesh" in text
+    assert "MIT License" in text

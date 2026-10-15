@@ -1,0 +1,6 @@
+AoI Bluetooth SIG Mesh
+Copyright (c) 2026 Pratik Thorat (Arena of Innovation)
+
+Portions of the mesh protocol code are derived from tuya-ble-mesh
+(https://github.com/11z4t/tuya-ble-mesh), Copyright (c) 11z4t and contributors,
+also released under the MIT License. Both are covered by the terms in LICENSE.
