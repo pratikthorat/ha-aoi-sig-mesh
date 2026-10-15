@@ -15,7 +15,7 @@ Control Bluetooth SIG Mesh lights and plugs from Home Assistant. Everything runs
 
 ## Install
 
-You need Home Assistant 2026.5 or newer with Bluetooth set up: a local adapter, or an ESPHome Bluetooth proxy.
+You need Home Assistant 2026.5 or newer with Bluetooth set up: a local adapter, or an ESPHome Bluetooth proxy with active connections enabled.
 
 1. In HACS, open the menu, choose **Custom repositories**, and add `https://github.com/OWNER/ha-aoi-sig-mesh` as an **Integration**.
 2. Install **AoI Bluetooth SIG Mesh** and restart Home Assistant.
@@ -32,7 +32,7 @@ Home Assistant creates new random keys and keeps them in its own storage. Nothin
 
 **From the network:** on the network's entry, choose **Add device** and pick the device from the list.
 
-Pairing takes 10–30 seconds. The first connection afterwards sets the device up, so its entity can take up to a minute to start working. A tap in that time may flip back once.
+Pairing usually takes 10–30 seconds, and up to a minute or two through a slow proxy. The first connection afterwards sets the device up, so its entity can take up to a minute to start working. A tap in that time may flip back once.
 
 If pairing fails:
 - **It stopped answering through an ESPHome Bluetooth proxy:** pairing through a proxy is fragile. Move the device near the Home Assistant machine's own Bluetooth adapter and try again.
@@ -53,11 +53,16 @@ The export holds your network keys, so delete it once the import is done. Home A
 
 If a SIG Mesh device runs on the `tuya_ble_mesh` custom integration today, **Import from Tuya BLE Mesh** copies its keys and device across. Nothing is reset or re-paired.
 
-Leave **Disable the old entry** on:
-- the old entry is disabled, because the two integrations would fight over the device's Bluetooth connection;
-- each old entity is renamed to `<entity_id>_tuya_ble_mesh`, and the new one takes over its entity id, so dashboards, automations and voice assistants keep working.
+Leave **Disable the old entry** on. The old entry is disabled, because the two integrations would fight over the device's Bluetooth connection.
 
-**To go back:** delete the new network entry, then enable the old entry again. The entity ids return to the old integration.
+`tuya_ble_mesh` has one entry per device, so import them one at a time. The first import creates the network; each later device from the same mesh joins it.
+
+- **The device that creates the network** keeps its entity ids. Each old entity is renamed to `<entity_id>_tuya_ble_mesh` and the new one takes over its id, so dashboards, automations and voice assistants keep working.
+- **A device that joins an existing network** gets new entity ids. Update the dashboards and automations that use it.
+
+**To go back:**
+- For the device that created the network: delete the new network entry (only while it holds no other devices), then enable the old entry again. The entity ids return to the old integration.
+- For a device that joined: delete it from the network without resetting it (not **Reset and remove**, which wipes its keys), then enable its old entry again. Its old entity ids were never taken, so they work again as they were.
 
 ## Manage a device
 
@@ -86,9 +91,9 @@ Deleting a device any other way removes it from Home Assistant but leaves it hol
 
 - **Repairs.** These appear under Settings > Repairs:
   - **"No mesh proxy in range":** no device of the network has been heard for a while. Check power and distance, or add a Bluetooth proxy nearer the devices.
-  - **"Keys rejected":** the network no longer accepts our keys. This happens when the devices were moved to another network.
+  - **"Keys rejected":** the network no longer accepts our keys, probably because it was reset or set up again with another app. Remove the network and import it again.
   - **"IV index jumped":** another controller moved the network forward by more than one step. The repair shows the new value and asks before adopting it.
-  - **"Device data damaged":** a device's stored data can't be read. Remove the device and add it again.
+  - **"Device data damaged":** a device's stored data can't be read, so it was skipped. Delete it from the network and import it again. If it was not imported, factory-reset it and add it again.
 - **ESPHome Bluetooth proxies** work for everyday use. Pairing new devices is more reliable through a local adapter.
 - **Range:** most mains-powered mesh devices relay messages for the others, so one device in range of Home Assistant is often enough for the whole network. If a far device stops answering, add a Bluetooth proxy nearer to it.
 - **Diagnostics** (on the network's entry) never contain keys or device MACs.

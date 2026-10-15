@@ -42,7 +42,7 @@
       },
       "disable_old": {
         "title": "Disable the old entry?",
-        "description": "{old} and this integration would fight over the device's one Bluetooth connection. To go back later, enable {old} again and disable the new network.",
+        "description": "{old} and this integration would fight over the device's one Bluetooth connection. To go back later, delete the device here (or the new network, if it holds only this device), then enable {old} again.",
         "data": {
           "disable_old": "Disable the old entry"
         }
@@ -101,7 +101,7 @@
       "half_provisioned": "{name} took the network's keys but did not confirm at the {step} step, so its state is unknown. Factory-reset it and add it again; its old address stays reserved."
     },
     "progress": {
-      "provision": "Adding {name} to the network. Keep it powered and close by; this takes up to a minute."
+      "provision": "Adding {name} to the network. Keep it powered and close by; this can take a minute or two."
     }
   },
   "options": {
@@ -185,7 +185,7 @@
         "device_removed": "{name} was deleted here without confirming the reset. If it still works, factory-reset it by hand."
       },
       "progress": {
-        "provision": "Adding {name} to the network. Keep it powered and close by; this takes up to a minute."
+        "provision": "Adding {name} to the network. Keep it powered and close by; this can take a minute or two."
       },
       "error": {
         "provision_failed": "The device stopped answering at the {step} step ({detail}). Move it closer, check it is still factory-reset and try again.",
@@ -198,7 +198,7 @@
         "reset_failed": "{name} did not confirm the reset. Check it is powered and in range, or tick the box to delete it here anyway.",
         "reset_not_running": "The network is not running, so nothing was sent. Check the network is enabled and try again, or tick the box to delete the device here.",
         "reset_no_proxy": "No mesh proxy is in range, so nothing was sent. Move closer or check the device has power, then try again, or tick the box to delete the device here.",
-        "reset_not_saved": "The network's state could not be saved, so nothing was sent. Check the Home Assistant log for disk errors and try again, or tick the box to delete the device here."
+        "reset_not_saved": "The network's state could not be saved, so the reset may not have gone out. Check the Home Assistant log for disk errors and try again, or tick the box to delete the device here."
       }
     }
   },
