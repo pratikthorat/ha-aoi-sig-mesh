@@ -73,6 +73,15 @@ def test_an_iv_jump_never_goes_backwards():
     assert saved == []
 
 
+def test_an_iv_jump_outside_the_iv_index_range_is_refused():
+    net, saved = network(iv_index=5, seq=40)
+    for iv in (-1, 0x1_0000_0000):
+        with pytest.raises(ValueError):
+            net.accept_iv_jump(beacon(iv))
+    assert net.iv_index == 5
+    assert saved == []
+
+
 def test_an_iv_jump_must_raise_the_transmit_iv_index():
     net, saved = network(iv_index=5, seq=500)
     before = net.persistent_state()

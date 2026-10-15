@@ -574,6 +574,22 @@ class MeshCoordinator:
             self.pending_iv_jump = None
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
 
+    async def async_accept_iv_jump(self) -> None:
+        """The user confirmed the pending jump (repair flow): adopt it and save it."""
+        beacon = self.pending_iv_jump
+        if beacon is None:
+            raise ValueError("no IV index jump is pending")
+        old = self.network.iv_index
+        self.network.accept_iv_jump(beacon)
+        self.pending_iv_jump = None
+        # Sends stay refused (SeqNotSaved) until the new block is on disk; a failed write
+        # is retried by the saver, so nothing goes out before it lands.
+        await self._saver.async_flush()
+        ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_IV_INDEX_JUMP}_{self.entry.entry_id}")
+        _LOGGER.warning(
+            "%s: IV index jumped from %d to %d on request", self.entry.title, old, beacon.iv_index
+        )
+
     @callback
     def _schedule_follow_up(self, record: NodeRecord, delay: float) -> None:
         if (cancel := self._follow_ups.pop(record.subentry_id, None)) is not None:

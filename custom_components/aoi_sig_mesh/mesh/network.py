@@ -246,6 +246,8 @@ class MeshNetwork:
         The block is reserved here, so with an async store the caller awaits the save (and
         ``mark_persisted``) before sending.
         """
+        if not 0 <= beacon.iv_index <= IV_INDEX_MAX:
+            raise ValueError(f"IV index {beacon.iv_index} is outside 0..{IV_INDEX_MAX}")
         new_tx = _tx_iv_index(beacon.iv_index, beacon.iv_update)
         if new_tx <= self.tx_iv_index:
             raise ValueError(
