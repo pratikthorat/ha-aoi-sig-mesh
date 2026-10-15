@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import itertools
 import struct
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
@@ -100,6 +101,14 @@ SET_LENGTHS = {  # params of each Set: the short form, or the long form with tra
     **dict.fromkeys((OP_CTL_SET, OP_CTL_SET_UNACK), (7, 9)),
     **dict.fromkeys((OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), (5, 7)),
 }
+SET_TIDS = {  # Set opcode: (the Get that reads the state back, TID offset in the params)
+    **dict.fromkeys((OP_ONOFF_SET, OP_ONOFF_SET_UNACK), (OP_ONOFF_GET, 1)),
+    **dict.fromkeys((OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK), (OP_LIGHTNESS_GET, 2)),
+    **dict.fromkeys((OP_CTL_SET, OP_CTL_SET_UNACK), (OP_CTL_GET, 6)),
+    **dict.fromkeys((OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), (OP_CTL_TEMP_GET, 4)),
+}
+UNACK_SETS = (OP_ONOFF_SET_UNACK, OP_LIGHTNESS_SET_UNACK, OP_CTL_SET_UNACK, OP_CTL_TEMP_SET_UNACK)
+TID_WINDOW = 6.0  # seconds: the same src+dst+TID inside it is a retransmission
 STATUS_INVALID_ADDRESS = 0x01
 STATUS_INVALID_MODEL = 0x02
 DEV_KEY_MODELS = (0x0000, 0x0002)  # Config Server and Health Server: never bound to the AppKey
@@ -150,6 +159,8 @@ class SimNode:
     bindings: set[tuple[int, int]] = field(default_factory=set)
     publications: dict[tuple[int, int], int] = field(default_factory=dict)
     received: list[tuple[int, int, bytes]] = field(default_factory=list)
+    tids: dict[int, tuple[int, float]] = field(default_factory=dict)  # dst: (TID, when)
+    retransmissions: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -197,6 +208,17 @@ class SimNode:
             return []
         if opcode in SET_LENGTHS and len(params) not in SET_LENGTHS[opcode]:
             return []
+        if opcode in SET_TIDS:
+            get_opcode, offset = SET_TIDS[opcode]
+            tid, now = params[offset], time.monotonic()
+            last = self.tids.get(dst)
+            self.tids[dst] = (tid, now)
+            if last is not None and last[0] == tid and now - last[1] < TID_WINDOW:
+                # A retransmission: answered with the current state, not applied again.
+                self.retransmissions += 1
+                if opcode in UNACK_SETS:
+                    return []
+                return self._model(dst - self.unicast, get_opcode, b"")
         return self._model(dst - self.unicast, opcode, params)
 
     def _model_status(self, element: int, model: int) -> int:
