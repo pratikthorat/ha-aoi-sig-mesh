@@ -6,12 +6,13 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.util import dt as dt_util
@@ -42,7 +43,7 @@ from .const import (
 from .mesh.configure import ConfigureError, configure_node
 from .mesh.connection import ConnectionManager, MeshRadio, ProxyCandidate
 from .mesh.control import NodeCommands, NodeState, TidCounter, apply_status
-from .mesh.errors import LinkClosedError, MeshTimeout, SeqNotSaved
+from .mesh.errors import LinkClosedError, MeshError, MeshTimeout, SeqNotSaved
 from .mesh.network import BeaconOutcome, MeshNetwork
 from .mesh.node import ROLE_HEALTH, ROLE_LIGHTNESS, MeshNode
 from .mesh.pdu import SecureBeacon
@@ -685,3 +686,107 @@ class MeshCoordinator:
     def _rssi_tick(self, _now: datetime) -> None:
         self._update_rssi()
         self._notify(None)
+
+    # commands (called by entities)
+
+    async def _async_command(
+        self,
+        record: NodeRecord,
+        before: NodeState,
+        action: Callable[[NodeCommands], Awaitable[None]],
+    ) -> None:
+        """Run ``action``; on failure restore ``before`` and raise a translated error."""
+        try:
+            link = await self.manager.get_link(COMMAND_CONNECT_TIMEOUT)
+        except MeshTimeout as err:  # no proxy came up within the wait
+            self._revert(record, before)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="not_connected",
+                translation_placeholders={"name": record.title},
+            ) from err
+        commands = NodeCommands(link, record.node, record.quirks, self._tids)
+        try:
+            try:
+                await action(commands)
+            except SeqNotSaved:  # the seq block's save is pending (or failed): save, retry once
+                await self._async_save_state()
+                await action(commands)
+        except SeqNotSaved as err:  # the save still is not on disk
+            self._revert(record, before)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="seq_not_saved",
+                translation_placeholders={"name": record.title},
+            ) from err
+        except MeshTimeout as err:  # before MeshError: an unanswered command counts as a miss
+            self._revert(record, before)
+            self._failed(record)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_failed",
+                translation_placeholders={"name": record.title},
+            ) from err
+        except MeshError as err:  # the link dropped, or the TIDs ran out
+            self._revert(record, before)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_failed",
+                translation_placeholders={"name": record.title},
+            ) from err
+        self.manager.touch()
+
+    @callback
+    def _revert(self, record: NodeRecord, before: NodeState) -> None:
+        record.state = before
+        self._notify(record.subentry_id)
+
+    async def async_turn_on(
+        self,
+        subentry_id: str,
+        *,
+        lightness: int | None = None,
+        kelvin: int | None = None,
+        transition_ms: int | None = None,
+    ) -> None:
+        record = self.nodes[subentry_id]
+        before = replace(record.state)
+        currently_on = bool(record.state.on)
+        record.state.on = True
+        if lightness is not None:
+            record.state.lightness = lightness
+        if kelvin is not None and record.node.is_tunable:
+            record.state.kelvin = max(record.node.kelvin_min, min(record.node.kelvin_max, kelvin))
+        self._notify(subentry_id)
+        await self._async_command(
+            record,
+            before,
+            lambda commands: commands.turn_on(
+                currently_on=currently_on,
+                lightness=lightness,
+                kelvin=kelvin,
+                transition_ms=transition_ms,
+            ),
+        )
+
+    async def async_turn_off(self, subentry_id: str, *, transition_ms: int | None = None) -> None:
+        record = self.nodes[subentry_id]
+        before = replace(record.state)
+        record.state.on = False
+        self._notify(subentry_id)
+        await self._async_command(
+            record, before, lambda commands: commands.turn_off(transition_ms=transition_ms)
+        )
+
+    async def async_identify(self, subentry_id: str) -> None:
+        record = self.nodes[subentry_id]
+        currently_on = bool(record.state.on)
+        await self._async_command(
+            record,
+            replace(record.state),
+            lambda commands: commands.identify(currently_on=currently_on),
+        )
+
+    @callback
+    def async_reconnect(self) -> None:
+        self.manager.reconnect()
