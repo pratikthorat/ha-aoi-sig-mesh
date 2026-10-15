@@ -1,5 +1,6 @@
 {
   "config": {
+    "flow_title": "{name}",
     "step": {
       "user": {
         "title": "Add a Bluetooth SIG Mesh network",
@@ -45,6 +46,19 @@
         "data": {
           "disable_old": "Disable the old entry"
         }
+      },
+      "device": {
+        "title": "Add {name}",
+        "description": "{name} is a factory-reset Bluetooth mesh device. Home Assistant gives it a network's keys and an address of its own, then sets it up. With no network yet, a new one is made for it.",
+        "data": {
+          "network": "Network",
+          "name": "Network name",
+          "role": "Device type"
+        },
+        "data_description": {
+          "network": "The network the device joins.",
+          "role": "Automatic makes a device with dimming a light and anything else a switch."
+        }
       }
     },
     "error": {
@@ -53,13 +67,18 @@
       "bad_iv_index": "The entry's IV index is missing or invalid.",
       "bad_address": "The entry's device address is invalid.",
       "bad_mac": "The entry's Bluetooth address is missing or invalid.",
-      "no_address": "No free address is left for Home Assistant in this network.",
+      "no_address": "No free unicast address is left in this network.",
       "nrf_bad_json": "This is not an nRF Mesh JSON export.",
       "nrf_bad_keys": "The export's network or application key is missing or invalid.",
       "nrf_key_refresh": "The network is in the middle of a key refresh. Finish it in nRF Mesh, then export again.",
       "nrf_no_app_key": "The export has no application key for its primary network key.",
       "nrf_bad_address": "The export has an invalid unicast address.",
-      "nrf_bad_iv_index": "The export's IV index is invalid."
+      "nrf_bad_iv_index": "The export's IV index is invalid.",
+      "provision_failed": "The device stopped answering at the {step} step ({detail}). Move it closer, check it is still factory-reset and try again.",
+      "provision_failed_remote": "The device stopped answering at the {step} step ({detail}) through an ESPHome Bluetooth proxy. Try again with the device close to Home Assistant's own Bluetooth adapter.",
+      "oob_required": "This device needs a code (OOB authentication) to join, which this integration does not support yet.",
+      "unknown": "Something unexpected went wrong while adding the device. Check the Home Assistant log and try again.",
+      "already_provisioning": "That device is already being added in another window."
     },
     "abort": {
       "already_configured": "This network or device is already set up.",
@@ -68,7 +87,19 @@
       "not_supported": "This Bluetooth device cannot be set up from discovery.",
       "node_added": "The device was added to your existing network.",
       "address_conflict": "This device's old integration sent from this network's own address; importing it would be unsafe.",
-      "cannot_save": "The provisioner address could not be saved, so nothing was imported. Check the Home Assistant log for disk errors."
+      "cannot_save": "The provisioner address could not be saved, so nothing was imported. Check the Home Assistant log for disk errors.",
+      "provision_failed": "The device stopped answering at the {step} step ({detail}) and is no longer in range. Move it closer and try again.",
+      "provision_failed_remote": "The device stopped answering at the {step} step ({detail}) through an ESPHome Bluetooth proxy and is no longer in range. Try again with it close to Home Assistant's own Bluetooth adapter.",
+      "oob_required": "This device needs a code (OOB authentication) to join, which this integration does not support yet.",
+      "no_address": "This network has no free address left for the device.",
+      "unknown": "Something unexpected went wrong while adding the device. Check the Home Assistant log and try again.",
+      "already_provisioning": "That device is already being added in another window.",
+      "device_gone": "This device is no longer advertising as factory-reset: it was added already, joined another network or is out of range.",
+      "device_added": "{name} was added to {network}. It is set up the next time Home Assistant connects to the network.",
+      "half_provisioned": "{name} took the network's keys but did not confirm at the {step} step, so its state is unknown. Factory-reset it and add it again; its old address stays reserved."
+    },
+    "progress": {
+      "provision": "Adding {name} to the network. Keep it powered and close by; this takes up to a minute."
     }
   },
   "options": {

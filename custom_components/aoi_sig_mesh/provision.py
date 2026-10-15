@@ -95,6 +95,16 @@ async def async_entry_iv(hass: HomeAssistant, entry: ConfigEntry) -> tuple[int, 
     return int(entry.data.get(CONF_IV_INDEX, 0)), False
 
 
+async def async_provision_into_entry(
+    hass: HomeAssistant, entry: ConfigEntry, device: UnprovisionedDevice
+) -> ProvisioningResult:
+    """Provision ``device`` into the network of ``entry`` (loaded or not)."""
+    iv_index, iv_update = await async_entry_iv(hass, entry)
+    return await async_provision_device(
+        hass, entry.data, device, iv_index=iv_index, iv_update=iv_update, taken=entry_taken(entry)
+    )
+
+
 async def async_provision_device(
     hass: HomeAssistant,
     data: Mapping[str, Any],

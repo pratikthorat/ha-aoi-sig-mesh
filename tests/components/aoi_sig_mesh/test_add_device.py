@@ -11,7 +11,7 @@ from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
-from custom_components.aoi_sig_mesh import config_flow
+from custom_components.aoi_sig_mesh import provision
 from custom_components.aoi_sig_mesh.const import DOMAIN, SUBENTRY_NODE
 from custom_components.aoi_sig_mesh.mesh import provisioner
 from custom_components.aoi_sig_mesh.mesh.errors import MeshError
@@ -253,7 +253,7 @@ async def test_an_unexpected_error_returns_to_the_form_as_unknown(
     async def boom(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("surprise")
 
-    monkeypatch.setattr(config_flow, "async_provision_device", boom)
+    monkeypatch.setattr(provision, "async_provision_device", boom)
     radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, name="Plug"))
 
     result = await open_add(hass, bulb_entry)

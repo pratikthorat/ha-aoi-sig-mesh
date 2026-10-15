@@ -53,6 +53,7 @@ from .const import (
     CONF_NAME,
     CONF_NET_KEY,
     CONF_NET_KEY_INDEX,
+    CONF_NETWORK,
     CONF_NRF_JSON,
     CONF_PUBLISH_SETUP,
     CONF_RANGE_HIGH,
@@ -64,6 +65,7 @@ from .const import (
     DEFAULT_PUBLISH_SETUP,
     DOMAIN,
     NEW_NETWORK_ADDRESS,
+    PROVISIONING_SERVICE_UUID,
     PROXY_SERVICE_UUID,
     ROLE_AUTO,
     ROLE_LIGHT,
@@ -86,15 +88,18 @@ from .mesh.importers import (
 )
 from .mesh.node import MeshNode
 from .mesh.pdu import NetworkKeys
-from .mesh.provisioner import ProvisioningResult, UnprovisionedDevice
+from .mesh.provisioner import (
+    ProvisioningResult,
+    UnprovisionedDevice,
+    parse_provisioning_service_data,
+)
 from .mesh.proxy import parse_proxy_service_data
 from .provision import (
     ProvisionFailed,
-    async_entry_iv,
     async_provision_device,
+    async_provision_into_entry,
     async_unprovisioned,
     claim_device,
-    entry_taken,
     release_device,
 )
 from .store import AddressBook
@@ -191,10 +196,117 @@ def nrf_subentry(nrf_node: NrfNode) -> dict[str, Any]:
     }
 
 
-class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+def forget_replay(entry: ConfigEntry, result: ProvisioningResult) -> None:
+    """The address is new to the network, but a replay entry may outlive a device removed
+    while the network was unloaded: the new device starts again at seq 0."""
+    if entry.state is ConfigEntryState.LOADED:
+        entry.runtime_data.async_forget_node(result.unicast, result.element_count)
+
+
+ADD_ROLES = [ROLE_AUTO, ROLE_LIGHT, ROLE_SWITCH]
+
+
+def role_selector() -> SelectSelector:
+    return SelectSelector(SelectSelectorConfig(options=ADD_ROLES, translation_key="add_role"))
+
+
+class ProvisionSteps:
+    """The steps Add device and Bluetooth discovery share.
+
+    The flow sets ``_device`` and ``_role`` (``_set_choice``), then calls
+    ``async_step_provision``; it supplies ``_async_provision`` and ``async_step_finish``. A
+    failure goes back to the step named ``_form_step``, which shows it with ``_take_failure``.
+    """
+
+    hass: HomeAssistant
+    _form_step = "user"
 
     def __init__(self) -> None:
+        self._device: UnprovisionedDevice | None = None
+        self._role: str | None = None
+        self._task: asyncio.Task[ProvisioningResult] | None = None
+        self._result: ProvisioningResult | None = None
+        self._failure: ProvisionFailed | None = None
+
+    def _take_failure(self) -> tuple[dict[str, str], dict[str, str]]:
+        """(errors, placeholders) for the form: the last failure, shown once."""
+        failure, self._failure = self._failure, None
+        if failure is None:
+            return {}, {"step": "", "detail": ""}
+        return {"base": failure.reason}, {"step": failure.step, "detail": failure.detail}
+
+    def _set_choice(self, device: UnprovisionedDevice, role: str) -> None:
+        self._device = device
+        self._role = None if role == ROLE_AUTO else role
+
+    async def _async_provision(self, device: UnprovisionedDevice) -> ProvisioningResult:
+        raise NotImplementedError
+
+    async def _async_form(self) -> Any:
+        return await getattr(self, f"async_step_{self._form_step}")()
+
+    async def async_step_provision(self, user_input: dict[str, Any] | None = None) -> Any:
+        """Give the device the network's keys and an address of its own (PB-GATT)."""
+        assert self._device is not None
+        if self._task is None:
+            address = self._device.address
+            if not claim_device(self.hass, address):
+                self._failure = ProvisionFailed("already_provisioning", "", "")
+                return await self._async_form()
+            self._task = self.hass.async_create_task(
+                self._async_provision(self._device), "aoi_sig_mesh provisioning"
+            )
+            # runs on success, failure and cancel (the dialog was closed)
+            self._task.add_done_callback(lambda _task: release_device(self.hass, address))
+        if not self._task.done():
+            return self.async_show_progress(  # type: ignore[attr-defined]
+                step_id="provision",
+                progress_action="provision",
+                progress_task=self._task,
+                description_placeholders={"name": device_title(self._device)},
+            )
+        task, self._task = self._task, None
+        try:
+            self._result = task.result()
+        except ProvisionFailed as err:
+            self._failure = err
+            if err.reason == "half_provisioned":
+                return self.async_show_progress_done(  # type: ignore[attr-defined]
+                    next_step_id="half_provisioned"
+                )
+            return self.async_show_progress_done(  # type: ignore[attr-defined]
+                next_step_id=self._form_step
+            )
+        except Exception as err:  # noqa: BLE001 - never leave the dialog spinning
+            _LOGGER.exception("Adding %s failed unexpectedly", self._device.address)
+            self._failure = ProvisionFailed("unknown", "", type(err).__name__)
+            return self.async_show_progress_done(  # type: ignore[attr-defined]
+                next_step_id=self._form_step
+            )
+        return self.async_show_progress_done(next_step_id="finish")  # type: ignore[attr-defined]
+
+    async def async_step_half_provisioned(self, user_input: dict[str, Any] | None = None) -> Any:
+        """The device may hold our keys now but did not confirm: only a reset recovers it."""
+        assert self._failure is not None and self._device is not None
+        return self.async_abort(  # type: ignore[attr-defined]
+            reason="half_provisioned",
+            description_placeholders={
+                "name": device_title(self._device),
+                "step": self._failure.step,
+            },
+        )
+
+
+class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
+    VERSION = 1
+    _form_step = "device"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._address: str | None = None  # a discovered factory-reset device
+        self._target: ConfigEntry | None = None  # the network it joins, or None for a new one
+        self._new_network: dict[str, Any] | None = None
+
         self._import: TuyaImport | None = None
         self._source: ConfigEntry | None = None
         self._existing: ConfigEntry | None = None
@@ -224,7 +336,20 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
     ) -> ConfigFlowResult:
-        """A mesh proxy advert. Only a network we can import (and do not have) is offered."""
+        """A factory-reset device (0x1827) is offered for adding. A mesh proxy advert (0x1828)
+        is offered only for a network we can import (and do not have)."""
+        if (
+            unprovisioned := discovery_info.service_data.get(PROVISIONING_SERVICE_UUID)
+        ) is not None:
+            parsed = parse_provisioning_service_data(unprovisioned)
+            if parsed is None:
+                return self.async_abort(reason="not_supported")
+            # One flow per device (its UUID); ignoring it hides only that device.
+            await self.async_set_unique_id(parsed[0].hex())
+            self._abort_if_unique_id_configured()
+            self._address = discovery_info.address.upper()
+            self.context["title_placeholders"] = {"name": discovery_info.name or self._address}
+            return await self.async_step_device()
         data = discovery_info.service_data.get(PROXY_SERVICE_UUID)
         advert = parse_proxy_service_data(data) if data else None
         if advert is None or advert.network_id is None:
@@ -241,6 +366,107 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._tuya_entries():
             options.append("tuya_import")
         return self.async_show_menu(step_id="user", menu_options=options)
+
+    async def async_step_device(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Add the discovered device to a network we have, or to a new one made for it."""
+        failure = self._failure
+        errors, placeholders = self._take_failure()
+        device = next(
+            (d for d in async_unprovisioned(self.hass) if d.address == self._address), None
+        )
+        if device is None:  # added meanwhile (Add device), reset into another network, or gone
+            if failure is not None:  # the real reason, not "gone"
+                return self.async_abort(
+                    reason=failure.reason,
+                    description_placeholders={"step": failure.step, "detail": failure.detail},
+                )
+            return self.async_abort(reason="device_gone")
+        networks = [
+            entry
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+            if entry.source != SOURCE_IGNORE
+        ]
+        # HA passes the submitted values on again when progress ends in this step: a pending
+        # failure means they were already used, so only show the form.
+        if user_input is not None and failure is None:
+            self._set_choice(device, user_input[CONF_ROLE])
+            if networks:
+                self._target = self.hass.config_entries.async_get_entry(user_input[CONF_NETWORK])
+                if self._target is None:  # deleted while the form was open
+                    return self.async_abort(reason="network_gone")
+            elif self._new_network is None:  # a retry keeps the network made for the first try
+                self._name = user_input[CONF_NAME]
+                net_key = secrets.token_bytes(16)
+                network_id = NetworkKeys.from_net_key(net_key).network_id.hex()
+                if not await self._async_reserve_address(network_id, NEW_NETWORK_ADDRESS):
+                    return self.async_abort(reason="cannot_save")
+                self._new_network = network_data(
+                    self._name, net_key, secrets.token_bytes(16), NEW_NETWORK_ADDRESS
+                )
+            return await self.async_step_provision()
+        fields: dict[Any, Any] = {}
+        if networks:
+            options = [SelectOptionDict(value=e.entry_id, label=e.title) for e in networks]
+            fields[vol.Required(CONF_NETWORK, default=networks[0].entry_id)] = SelectSelector(
+                SelectSelectorConfig(options=options)
+            )
+        else:
+            fields[vol.Required(CONF_NAME, default=self._name)] = str
+        fields[vol.Required(CONF_ROLE, default=ROLE_AUTO)] = role_selector()
+        return self.async_show_form(
+            step_id="device",
+            data_schema=vol.Schema(fields),
+            errors=errors,
+            description_placeholders={**placeholders, "name": device_title(device)},
+        )
+
+    async def _async_provision(self, device: UnprovisionedDevice) -> ProvisioningResult:
+        if self._target is not None:
+            return await async_provision_into_entry(self.hass, self._target, device)
+        assert self._new_network is not None
+        return await async_provision_device(
+            self.hass, self._new_network, device, iv_index=0, taken=[(NEW_NETWORK_ADDRESS, 1)]
+        )
+
+    async def async_step_finish(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """The device is on the mesh: the network sets it up on its next connect."""
+        assert self._result is not None and self._device is not None
+        result, title = self._result, device_title(self._device)
+        data = provisioned_subentry_data(result, self._role, self._device.address)
+        unique_id = node_unique_id(result.unicast)
+        if (entry := self._target) is not None:
+            forget_replay(entry, result)
+            self.hass.config_entries.async_add_subentry(
+                entry,
+                ConfigSubentry(
+                    data=MappingProxyType(data),
+                    subentry_type=SUBENTRY_NODE,
+                    title=title,
+                    unique_id=unique_id,
+                ),
+            )
+            return self.async_abort(
+                reason="device_added",
+                description_placeholders={"name": title, "network": entry.title},
+            )
+        assert self._new_network is not None
+        net_key = bytes.fromhex(self._new_network[CONF_NET_KEY])
+        await self.async_set_unique_id(
+            NetworkKeys.from_net_key(net_key).network_id.hex(), raise_on_progress=False
+        )
+        return self.async_create_entry(
+            title=self._name,
+            data=self._new_network,
+            options=dict(DEFAULT_OPTIONS),
+            subentries=[
+                {
+                    "subentry_type": SUBENTRY_NODE,
+                    "title": title,
+                    "unique_id": unique_id,
+                    "data": data,
+                }
+            ],
+        )
 
     async def _async_reserve_address(self, network_id: str, address: int) -> bool:
         """Record ``address`` as ours for good, so no later import or reset reuses its seqs."""
@@ -622,33 +848,20 @@ class AoiSigMeshOptionsFlow(OptionsFlow):
         return self.async_show_form(step_id="init", data_schema=schema)
 
 
-ADD_ROLES = [ROLE_AUTO, ROLE_LIGHT, ROLE_SWITCH]
-
-
-class NodeSubentryFlow(ConfigSubentryFlow):
+class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
     """Add device provisions a factory-reset device; reconfigure picks the role."""
 
     def __init__(self) -> None:
+        super().__init__()
         self._devices: dict[str, UnprovisionedDevice] = {}
-        self._device: UnprovisionedDevice | None = None
-        self._role: str | None = None
-        self._task: asyncio.Task[ProvisioningResult] | None = None
-        self._result: ProvisioningResult | None = None
-        self._failure: ProvisionFailed | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
         """Pick a factory-reset device in range, and what it should be."""
-        errors: dict[str, str] = {}
-        placeholders: dict[str, str] = {"step": "", "detail": ""}
-        if (failure := self._failure) is not None:
-            self._failure = None
-            errors["base"] = failure.reason
-            placeholders = {"step": failure.step, "detail": failure.detail}
-        elif user_input is not None:
+        failure = self._failure
+        errors, placeholders = self._take_failure()
+        if failure is None and user_input is not None:
             # the selector only accepts a listed device
-            self._device = self._devices[user_input[CONF_DEVICE]]
-            role = user_input[CONF_ROLE]
-            self._role = None if role == ROLE_AUTO else role
+            self._set_choice(self._devices[user_input[CONF_DEVICE]], user_input[CONF_ROLE])
             return await self.async_step_provision()
         devices = async_unprovisioned(self.hass)
         if not devices:
@@ -676,9 +889,7 @@ class NodeSubentryFlow(ConfigSubentryFlow):
                         ]
                     )
                 ),
-                vol.Required(CONF_ROLE, default=ROLE_AUTO): SelectSelector(
-                    SelectSelectorConfig(options=ADD_ROLES, translation_key="add_role")
-                ),
+                vol.Required(CONF_ROLE, default=ROLE_AUTO): role_selector(),
             }
         )
         return self.async_show_form(
@@ -688,77 +899,16 @@ class NodeSubentryFlow(ConfigSubentryFlow):
             description_placeholders=placeholders,
         )
 
-    async def async_step_provision(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        """Give the device the network's keys and an address of its own (PB-GATT)."""
-        assert self._device is not None
-        if self._task is None:
-            address = self._device.address
-            if not claim_device(self.hass, address):
-                self._failure = ProvisionFailed("already_provisioning", "", "")
-                return await self.async_step_user()
-            self._task = self.hass.async_create_task(
-                self._async_provision(self._device), "aoi_sig_mesh provisioning"
-            )
-            # runs on success, failure and cancel (the dialog was closed)
-            self._task.add_done_callback(lambda _task: release_device(self.hass, address))
-        if not self._task.done():
-            return self.async_show_progress(
-                step_id="provision",
-                progress_action="provision",
-                progress_task=self._task,
-                description_placeholders={"name": device_title(self._device)},
-            )
-        task, self._task = self._task, None
-        try:
-            self._result = task.result()
-        except ProvisionFailed as err:
-            self._failure = err
-            if err.reason == "half_provisioned":
-                return self.async_show_progress_done(next_step_id="half_provisioned")
-            return self.async_show_progress_done(next_step_id="user")
-        except Exception as err:  # noqa: BLE001 - never leave the dialog spinning
-            _LOGGER.exception("Adding %s failed unexpectedly", self._device.address)
-            self._failure = ProvisionFailed("unknown", "", type(err).__name__)
-            return self.async_show_progress_done(next_step_id="user")
-        return self.async_show_progress_done(next_step_id="finish")
-
     async def _async_provision(self, device: UnprovisionedDevice) -> ProvisioningResult:
-        entry = self._get_entry()
-        iv_index, iv_update = await async_entry_iv(self.hass, entry)
-        return await async_provision_device(
-            self.hass,
-            entry.data,
-            device,
-            iv_index=iv_index,
-            iv_update=iv_update,
-            taken=entry_taken(entry),
-        )
-
-    async def async_step_half_provisioned(
-        self, user_input: dict[str, Any] | None = None
-    ) -> SubentryFlowResult:
-        """The device may hold our keys now but did not confirm: only a reset recovers it."""
-        assert self._failure is not None and self._device is not None
-        return self.async_abort(
-            reason="half_provisioned",
-            description_placeholders={
-                "name": device_title(self._device),
-                "step": self._failure.step,
-            },
-        )
+        return await async_provision_into_entry(self.hass, self._get_entry(), device)
 
     async def async_step_finish(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """The device is on the mesh: the network sets it up on its next connect."""
         assert self._result is not None and self._device is not None
-        result, entry = self._result, self._get_entry()
-        if entry.state is ConfigEntryState.LOADED:
-            # The address is new to the network, but a replay entry may outlive a device
-            # removed while the network was unloaded: the new device starts at seq 0.
-            entry.runtime_data.async_forget_node(result.unicast, result.element_count)
+        result = self._result
+        forget_replay(self._get_entry(), result)
         return self.async_create_entry(
             title=device_title(self._device),
             data=provisioned_subentry_data(result, self._role, self._device.address),

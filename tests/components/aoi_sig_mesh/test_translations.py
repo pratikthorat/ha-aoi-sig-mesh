@@ -48,6 +48,25 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config.abort.address_conflict",
         "config.abort.cannot_save",
         "config.error.bad_mac",
+        "config.flow_title",
+        "config.step.device.data.network",
+        "config.step.device.data.name",
+        "config.step.device.data.role",
+        "config.progress.provision",
+        "config.error.provision_failed",
+        "config.error.provision_failed_remote",
+        "config.error.oob_required",
+        "config.error.unknown",
+        "config.error.already_provisioning",
+        "config.abort.device_gone",
+        "config.abort.device_added",
+        "config.abort.half_provisioned",
+        "config.abort.provision_failed",
+        "config.abort.provision_failed_remote",
+        "config.abort.oob_required",
+        "config.abort.no_address",
+        "config.abort.unknown",
+        "config.abort.already_provisioning",
         "options.step.init.data.idle_timeout",
         "options.step.init.data.publish_setup",
         "config_subentries.node.initiate_flow.user",
@@ -128,11 +147,15 @@ def test_the_iv_index_jump_issue_is_a_fix_flow() -> None:
 
 
 def test_provisioning_texts_use_only_the_placeholders_the_flow_passes() -> None:
-    node = STRINGS["config_subentries"]["node"]
-    for key in ("provision_failed", "provision_failed_remote"):
-        assert placeholders(node["error"][key]) == {"step", "detail"}
-    assert placeholders(node["abort"]["half_provisioned"]) == {"name", "step"}
-    assert placeholders(node["progress"]["provision"]) == {"name"}
+    for flow in (STRINGS["config_subentries"]["node"], STRINGS["config"]):
+        for key in ("provision_failed", "provision_failed_remote"):
+            assert placeholders(flow["error"][key]) == {"step", "detail"}
+        assert placeholders(flow["abort"]["half_provisioned"]) == {"name", "step"}
+        assert placeholders(flow["progress"]["provision"]) == {"name"}
+    config = STRINGS["config"]
+    assert placeholders(config["step"]["device"]["description"]) == {"name"}
+    assert placeholders(config["abort"]["device_added"]) == {"name", "network"}
+    assert placeholders(config["flow_title"]) == {"name"}
 
 
 def test_exceptions_name_the_device() -> None:
