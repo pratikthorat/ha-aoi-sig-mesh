@@ -27,6 +27,9 @@ PROVISIONER_LOW = 0x7F00
 PROVISIONER_HIGH = UNICAST_MAX
 NODE_RANGE_LOW = 0x0002
 NODE_RANGE_HIGH = 0x7EFF
+# A node's role addresses must lie within this many elements of its unicast address.
+MAX_IMPORT_ELEMENTS = 16
+IV_INDEX_MAX = 0xFFFFFFFF
 
 
 class TuyaImportError(MeshError):
@@ -73,6 +76,20 @@ def _unicast(data: Mapping[str, Any], name: str, default: str | None = None) -> 
     return value
 
 
+def _optional_id(value: Any) -> int | None:
+    """A CID/PID/VID as an int (ints or "0x.." / decimal strings), else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            return None
+    return None
+
+
 def _kelvin_range(sig: Mapping[str, Any]) -> tuple[int, int]:
     rng = sig.get("temp_range")
     if isinstance(rng, (list, tuple)) and len(rng) == 2:
@@ -106,10 +123,13 @@ def import_tuya_entry(
     dev_key = _key(data, "dev_key")
     unicast = _unicast(data, "unicast_target")
     old_address = _unicast(data, "unicast_our", "0001")
-    try:
-        iv_index = int(data.get("iv_index", 0))
-    except (TypeError, ValueError) as err:
-        raise TuyaImportError("bad_keys", "iv_index is not a number") from err
+    iv_index = data.get("iv_index", 0)
+    if (
+        not isinstance(iv_index, int)
+        or isinstance(iv_index, bool)
+        or not 0 <= iv_index <= IV_INDEX_MAX
+    ):
+        raise TuyaImportError("bad_iv_index", "iv_index is not an integer from 0 to 0xFFFFFFFF")
     mac = str(data.get("mac_address", "")).upper()
 
     sig = data.get("sig_models")
@@ -126,6 +146,11 @@ def import_tuya_entry(
             except (TypeError, ValueError):
                 continue
     models.setdefault(ROLE_ONOFF, unicast)
+    for role, address in models.items():
+        if not unicast <= address < unicast + MAX_IMPORT_ELEMENTS:
+            raise TuyaImportError(
+                "bad_address", f"{role} address 0x{address:04X} is not within the node"
+            )
     elements = max(1, elements, max(models.values()) - unicast + 1)
     kelvin_min, kelvin_max = _kelvin_range(sig)
     try:
@@ -133,9 +158,9 @@ def import_tuya_entry(
             unicast=unicast,
             element_count=elements,
             dev_key=dev_key,
-            cid=sig.get("cid"),
-            pid=sig.get("pid"),
-            vid=sig.get("vid"),
+            cid=_optional_id(sig.get("cid")),
+            pid=_optional_id(sig.get("pid")),
+            vid=_optional_id(sig.get("vid")),
             models=models,
             kelvin_min=kelvin_min,
             kelvin_max=kelvin_max,
