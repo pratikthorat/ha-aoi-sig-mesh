@@ -1,0 +1,60 @@
+name: Bug report
+description: Something does not work as the README says it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Diagnostics never contain keys or device MACs, so they are safe to attach.
+        Please do not paste an nRF Mesh export or anything from Home Assistant's `.storage` folder: those hold your network keys.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Integration version
+      description: Shown in HACS, or under Settings > Devices & services > AoI Bluetooth SIG Mesh.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: ha
+    attributes:
+      label: Home Assistant version
+      placeholder: 2026.5.4
+    validations:
+      required: true
+  - type: dropdown
+    id: bluetooth
+    attributes:
+      label: How Home Assistant reaches Bluetooth
+      options:
+        - Local adapter
+        - ESPHome Bluetooth proxy
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Brand and model of the light or plug, and how it joined (discovery, nRF Mesh import, Tuya BLE Mesh import).
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: On the network's entry, choose the three dots > Download diagnostics, then drag the file here.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug log
+      description: |
+        On the integration's page, choose Enable debug logging, repeat the problem, then Disable debug logging and paste the lines that mention aoi_sig_mesh.
+      render: text

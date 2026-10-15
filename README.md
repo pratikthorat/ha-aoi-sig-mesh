@@ -1,7 +1,15 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pratikthorat/ha-aoi-sig-mesh/main/custom_components/aoi_sig_mesh/brand/dark_logo@2x.png">
+  <img alt="AoI Bluetooth SIG Mesh" height="96" src="https://raw.githubusercontent.com/pratikthorat/ha-aoi-sig-mesh/main/custom_components/aoi_sig_mesh/brand/logo@2x.png">
+</picture>
+
 # AoI Bluetooth SIG Mesh
 
+[![Release](https://img.shields.io/github/v/release/pratikthorat/ha-aoi-sig-mesh)](https://github.com/pratikthorat/ha-aoi-sig-mesh/releases)
+[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz)
 [![Tests](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/tests.yml/badge.svg)](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/tests.yml)
 [![Validate](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/validate.yml/badge.svg)](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/validate.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control Bluetooth SIG Mesh lights and plugs from Home Assistant. Everything runs locally: there is no vendor hub, no cloud and no account. By Arena of Innovation.
 
@@ -17,12 +25,16 @@ Control Bluetooth SIG Mesh lights and plugs from Home Assistant. Everything runs
 
 You need Home Assistant 2026.5 or newer with Bluetooth set up: a local adapter, or an ESPHome Bluetooth proxy with active connections enabled.
 
-1. In HACS, open the menu, choose **Custom repositories**, and add `https://github.com/pratikthorat/ha-aoi-sig-mesh` as an **Integration**.
-2. Install **AoI Bluetooth SIG Mesh** and restart Home Assistant.
+[![Open your Home Assistant and show this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=pratikthorat&repository=ha-aoi-sig-mesh&category=integration)
+
+1. Select the button above to open this repository in HACS. Or, in HACS, open the menu, choose **Custom repositories**, and add `https://github.com/pratikthorat/ha-aoi-sig-mesh` as an **Integration**.
+2. Download **AoI Bluetooth SIG Mesh** and restart Home Assistant.
 
 ## Create a network
 
-Settings > Devices & services > **Add integration** > AoI Bluetooth SIG Mesh > **Create a new network**. Give the network a name.
+[![Open your Home Assistant and add this integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=aoi_sig_mesh)
+
+Select the button above, or go to Settings > Devices & services > **Add integration** > AoI Bluetooth SIG Mesh. Choose **Create a new network** and give the network a name.
 
 Home Assistant creates new random keys and keeps them in its own storage. Nothing is sent anywhere.
 
@@ -114,6 +126,14 @@ Reports go in the issue tracker at `https://github.com/pratikthorat/ha-aoi-sig-m
 ## Credits
 
 The mesh protocol code started from [tuya-ble-mesh](https://github.com/11z4t/tuya-ble-mesh) by 11z4t (MIT). Thank you.
+
+Bug reports, device reports and code are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately, as [SECURITY.md](SECURITY.md) explains.
+
+## Disclaimer
+
+This is an independent project. It is not affiliated with, endorsed by or supported by the Bluetooth SIG, Tuya, Nordic Semiconductor, Home Assistant or the Open Home Foundation. Bluetooth® is a registered trademark of Bluetooth SIG, Inc. Other names are trademarks of their owners and are used only to say what this works with.
+
+It switches mains-powered devices. It is provided as is, without warranty (see [LICENSE](LICENSE)): use it at your own risk, and do not rely on it where a device failing to switch could cause harm.
 
 ## Licence
 

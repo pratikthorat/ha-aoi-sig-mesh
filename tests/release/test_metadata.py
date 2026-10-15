@@ -9,6 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 INTEGRATION = ROOT / "custom_components" / "aoi_sig_mesh"
 REPO_RE = re.compile(r"https://github\.com/([A-Za-z0-9-]+)/ha-aoi-sig-mesh")
+# The logo, the release badge and the Open-in-HACS button name the owner in other shapes.
+OTHER_pratikthorat_RE = re.compile(
+    r"(?:raw\.githubusercontent\.com/|github/v/release/|owner=)([A-Za-z0-9-]+)"
+)
 IOT_CLASSES = {
     "assumed_state",
     "calculated",
@@ -59,11 +63,12 @@ def test_every_owner_link_agrees() -> None:
     data = manifest()
     owner = REPO_RE.fullmatch(data["documentation"]).group(1)
     assert data["codeowners"] == [f"@{owner}"]
-    for name in ("README.md", "RELEASING.md"):
+    for name in ("README.md", "RELEASING.md", "SECURITY.md", ".github/ISSUE_TEMPLATE/config.yml"):
         path = ROOT / name
         if not path.exists():
             continue
-        found = set(REPO_RE.findall(path.read_text()))
+        text = path.read_text()
+        found = {*REPO_RE.findall(text), *OTHER_pratikthorat_RE.findall(text)}
         assert found <= {owner}, f"{name} links to {found - {owner}}"
 
 

@@ -1,0 +1,20 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: python tools/check_release.py "$TAG"

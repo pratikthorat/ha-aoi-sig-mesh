@@ -25,8 +25,14 @@ def test_readme_covers_every_setup_path() -> None:
         "## Troubleshooting",
         "## What is tested on hardware",
         "## Credits",
+        "## Disclaimer",
     ):
         assert heading in README, heading
+
+
+def test_readme_says_it_is_independent() -> None:
+    assert "not affiliated with" in README
+    assert "Bluetooth® is a registered trademark of Bluetooth SIG, Inc." in README
 
 
 def test_readme_says_actions_not_services() -> None:

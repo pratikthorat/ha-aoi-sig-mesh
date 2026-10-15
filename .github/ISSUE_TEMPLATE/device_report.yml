@@ -1,0 +1,47 @@
+name: Device report
+description: Tell us a light or plug works (or does not) so the README's hardware table can list it.
+labels: [device report]
+body:
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Brand, model, and where you bought it.
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - On/off plug
+        - Dimmable light
+        - Tunable-white light
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: joined
+    attributes:
+      label: How it joined
+      options:
+        - Added after a factory reset
+        - Imported from nRF Mesh
+        - Moved from Tuya BLE Mesh
+    validations:
+      required: true
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What works
+      options:
+        - label: On/off
+        - label: Brightness
+        - label: Colour temperature
+        - label: A change made at the device shows up in Home Assistant
+        - label: Identify
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: What did not work, the integration and Home Assistant versions, and whether you used an ESPHome Bluetooth proxy.
