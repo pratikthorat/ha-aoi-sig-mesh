@@ -25,6 +25,10 @@ class LinkClosedError(MeshError):
     """The proxy link is closed or dropped."""
 
 
+class NoMeshLink(LinkClosedError):
+    """There was no proxy link to send on, so nothing was sent."""
+
+
 class SeqNotSaved(MeshError):
     """Sequence numbers are reserved but not saved yet; try again shortly."""
 

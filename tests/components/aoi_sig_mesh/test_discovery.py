@@ -142,6 +142,33 @@ async def test_with_a_network_the_device_joins_the_chosen_one(
     await until(lambda: hass.states.get("switch.plug") is not None)
 
 
+async def test_adding_a_discovered_device_aborts_the_other_card_for_it(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio, bulb_entry: Any
+) -> None:
+    """The card was raised from an older advert; the device now advertises a new UUID, which
+    a second card (another address) carries. Two cards can't share a UUID, so this is the only
+    way to have a stale one on the discovery path."""
+    old = SimUnprovisioned(PLUG_MAC, name="Plug")
+    radio.advertise_unprovisioned(old)
+    card = await discover(hass, old)
+    new = SimUnprovisioned(PLUG_MAC, name="Plug")  # same address, new UUID
+    radio.advertise_unprovisioned(new)
+    stale = SimUnprovisioned("DC:23:50:00:00:29", uuid=new.uuid, name="Twin")
+    radio.advertise_unprovisioned(stale)
+    other = await discover(hass, stale)
+    unrelated = SimUnprovisioned("DC:23:50:00:00:30", name="Lamp")
+    radio.advertise_unprovisioned(unrelated)
+    keep = await discover(hass, unrelated)
+
+    result = await provision(hass, card, network=bulb_entry.entry_id, role="auto")
+
+    assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "device_added")
+    left = [f["flow_id"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)]
+    assert left == [keep["flow_id"]]
+    assert other["flow_id"] not in left
+    await hass.async_block_till_done()
+
+
 async def test_a_failure_shows_on_the_device_form_and_a_retry_keeps_the_new_network(
     hass: HomeAssistant, sim: SimMesh, radio: SimRadio
 ) -> None:

@@ -76,6 +76,7 @@ from .const import (
     TUYA_DOMAIN,
 )
 from .coordinator import claimed_range, default_role, node_role, read_node
+from .mesh.errors import NoMeshLink
 from .mesh.importers import (
     NODE_RANGE_HIGH,
     NODE_RANGE_LOW,
@@ -1034,16 +1035,24 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
                     await entry.runtime_data.async_reset_node(subentry_id)
                 except HomeAssistantError as err:
                     _LOGGER.warning("%s: Node Reset was not confirmed: %s", subentry.title, err)
-                    if err.translation_key in ("not_connected", "seq_not_saved"):
-                        reason = "reset_no_proxy"  # refused before anything was sent
+                    # Only these were refused before anything was sent. A link that dropped
+                    # after the reset went out stays reset_failed: the device may have acted.
+                    if isinstance(err.__cause__, NoMeshLink):
+                        reason = "reset_no_proxy"
+                    elif err.translation_key == "seq_not_saved":
+                        reason = "reset_not_saved"
                 else:
                     confirmed = True
             if confirmed or user_input[CONF_REMOVE_ANYWAY]:
                 self.hass.config_entries.async_remove_subentry(entry, subentry.subentry_id)
                 if confirmed and (mac := subentry.data.get(CONF_MAC)):
-                    # HA's matcher has seen 0x1827 from this address before, so it would not
-                    # offer the reset device again. After the removal: it is not ours now.
-                    bluetooth.async_rediscover_address(self.hass, str(mac).upper())
+                    # HA merges adverts per address, so the reset device would keep its old
+                    # 0x1828 entry (tried as a proxy) and UUID; and HA's matcher has seen 0x1827
+                    # from it before, so it would not offer it again. After the removal: it is
+                    # not ours now.
+                    address = str(mac).upper()
+                    bluetooth.async_clear_advertisement_history(self.hass, address)
+                    bluetooth.async_rediscover_address(self.hass, address)
                 return self.async_abort(
                     reason="device_reset" if confirmed else "device_removed",
                     description_placeholders=placeholders,

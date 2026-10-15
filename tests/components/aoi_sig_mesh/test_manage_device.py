@@ -20,7 +20,13 @@ from custom_components.aoi_sig_mesh.const import (
     SUBENTRY_NODE,
 )
 from custom_components.aoi_sig_mesh.coordinator import FAILURES_UNAVAILABLE
-from custom_components.aoi_sig_mesh.mesh.errors import LinkClosedError, MeshError, MeshTimeout
+from custom_components.aoi_sig_mesh.mesh.errors import (
+    LinkClosedError,
+    MeshError,
+    MeshTimeout,
+    NoMeshLink,
+    SeqNotSaved,
+)
 from tests.sim.mesh_sim import SimMesh, SimNode
 from tests.sim.sim_radio import BULB_MAC, SimRadio
 
@@ -47,6 +53,15 @@ def rediscover() -> Iterator[MagicMock]:
     """bluetooth.async_rediscover_address (HA's bluetooth is not set up in these tests)."""
     with patch(
         "homeassistant.components.bluetooth.async_rediscover_address", autospec=True
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture(autouse=True)
+def clear_history() -> Iterator[MagicMock]:
+    """bluetooth.async_clear_advertisement_history, likewise."""
+    with patch(
+        "homeassistant.components.bluetooth.async_clear_advertisement_history", autospec=True
     ) as mock:
         yield mock
 
@@ -150,11 +165,12 @@ async def test_an_unconfirmed_reset_keeps_the_device_unless_asked_to_remove_it(
 
 
 @pytest.mark.parametrize(
-    ("key", "error"),
+    ("cause", "key", "error"),
     [
-        ("not_connected", "reset_no_proxy"),  # no proxy link: nothing was sent
-        ("seq_not_saved", "reset_no_proxy"),  # refused before sending
-        ("command_failed", "reset_failed"),  # sent, not confirmed
+        (NoMeshLink("no link"), "not_connected", "reset_no_proxy"),  # nothing was sent
+        (SeqNotSaved("not saved"), "seq_not_saved", "reset_not_saved"),  # refused before sending
+        (LinkClosedError("dropped"), "not_connected", "reset_failed"),  # may have been sent
+        (MeshTimeout("no answer"), "command_failed", "reset_failed"),  # sent, not confirmed
     ],
 )
 async def test_a_reset_that_was_never_sent_says_so(
@@ -162,6 +178,7 @@ async def test_a_reset_that_was_never_sent_says_so(
     sim: SimMesh,
     plug_entry: Any,
     rediscover: MagicMock,
+    cause: MeshError,
     key: str,
     error: str,
 ) -> None:
@@ -169,6 +186,7 @@ async def test_a_reset_that_was_never_sent_says_so(
     failure = HomeAssistantError(
         translation_domain=DOMAIN, translation_key=key, translation_placeholders={"name": "Kettle"}
     )
+    failure.__cause__ = cause
     result = await open_step(hass, plug_entry, "reset_remove")
 
     with patch.object(coordinator, "async_reset_node", side_effect=failure):
@@ -181,6 +199,25 @@ async def test_a_reset_that_was_never_sent_says_so(
     assert len(plug_entry.subentries) == 1
     assert not plug_of(sim).reset
     rediscover.assert_not_called()
+
+
+async def test_a_reset_whose_link_drops_after_it_was_sent_does_not_say_nothing_was_sent(
+    hass: HomeAssistant, sim: SimMesh, plug_entry: Any
+) -> None:
+    """Resetting the node that is the proxy: it acts on the reset, then the link drops."""
+    sim.silent = True
+    coordinator = plug_entry.runtime_data
+    result = await open_step(hass, plug_entry, "reset_remove")
+    task = hass.async_create_task(
+        hass.config_entries.subentries.async_configure(result["flow_id"], {"remove_anyway": False})
+    )
+    await until(lambda: plug_of(sim).reset)
+    coordinator.manager.link._on_disconnect()
+
+    result = await task
+
+    assert result["errors"] == {"base": "reset_failed"}
+    assert len(plug_entry.subentries) == 1
 
 
 async def test_a_reset_with_no_proxy_in_range_says_nothing_was_sent(
@@ -221,13 +258,16 @@ async def test_a_network_that_is_not_running_cannot_reset(
 
 
 async def test_a_confirmed_reset_lets_bluetooth_discover_the_device_again(
-    hass: HomeAssistant, plug_entry: Any, rediscover: MagicMock
+    hass: HomeAssistant, plug_entry: Any, rediscover: MagicMock, clear_history: MagicMock
 ) -> None:
     """HA's matcher already holds 0x1827 for this address, so without a rediscover the reset
     device would never show up as discovered again."""
-    removed_first: list[bool] = []
-    rediscover.side_effect = lambda _hass, _address: removed_first.append(
-        plug_entry.subentries == {}
+    calls: list[tuple[str, bool]] = []
+    clear_history.side_effect = lambda _hass, _address: calls.append(
+        ("clear", plug_entry.subentries == {})
+    )
+    rediscover.side_effect = lambda _hass, _address: calls.append(
+        ("rediscover", plug_entry.subentries == {})
     )
     result = await open_step(hass, plug_entry, "reset_remove")
 
@@ -236,12 +276,18 @@ async def test_a_confirmed_reset_lets_bluetooth_discover_the_device_again(
     )
 
     assert result["reason"] == "device_reset"
+    clear_history.assert_called_once_with(hass, BULB_MAC)  # drops the stale 0x1828 and UUID
     rediscover.assert_called_once_with(hass, BULB_MAC)
-    assert removed_first == [True]  # else the new discovery would see it as one of our nodes
+    # Both after the removal, else the new discovery would see it as one of our nodes
+    assert calls == [("clear", True), ("rediscover", True)]
 
 
 async def test_an_unconfirmed_reset_does_not_rediscover_the_device(
-    hass: HomeAssistant, sim: SimMesh, plug_entry: Any, rediscover: MagicMock
+    hass: HomeAssistant,
+    sim: SimMesh,
+    plug_entry: Any,
+    rediscover: MagicMock,
+    clear_history: MagicMock,
 ) -> None:
     sim.silent = True
     result = await open_step(hass, plug_entry, "reset_remove")
@@ -252,6 +298,7 @@ async def test_an_unconfirmed_reset_does_not_rediscover_the_device(
 
     assert result["reason"] == "device_removed"
     rediscover.assert_not_called()
+    clear_history.assert_not_called()
 
 
 async def test_a_confirmed_reset_forgets_the_nodes_replay_entry(

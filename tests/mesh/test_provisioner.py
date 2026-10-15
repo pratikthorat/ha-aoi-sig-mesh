@@ -611,8 +611,8 @@ def test_a_hanging_provisioning_connect_times_out_at_connect(monkeypatch):
     run(scenario())
 
 
-def test_the_provisioning_connect_timeout_is_30_s():
-    assert provisioner.PROVISIONING_CONNECT_TIMEOUT == 30.0
+def test_the_provisioning_connect_timeout_is_65_s():
+    assert provisioner.PROVISIONING_CONNECT_TIMEOUT == 65.0
 
 
 def test_a_connect_error_of_its_own_is_not_called_a_timeout(monkeypatch):

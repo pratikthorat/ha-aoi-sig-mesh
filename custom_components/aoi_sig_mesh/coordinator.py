@@ -44,7 +44,7 @@ from .const import (
 from .mesh.configure import ConfigureError, configure_node
 from .mesh.connection import ConnectionManager, MeshRadio, ProxyCandidate
 from .mesh.control import NodeCommands, NodeState, TidCounter, apply_status, status_is_for
-from .mesh.errors import LinkClosedError, MeshError, MeshTimeout, SeqNotSaved
+from .mesh.errors import LinkClosedError, MeshError, MeshTimeout, NoMeshLink, SeqNotSaved
 from .mesh.network import BeaconOutcome, MeshNetwork
 from .mesh.node import ROLE_HEALTH, ROLE_LIGHTNESS, MeshNode
 from .mesh.pdu import SecureBeacon
@@ -815,7 +815,7 @@ class MeshCoordinator:
         """
         try:
             if (link := await self._async_command_link()) is None:
-                raise LinkClosedError("no mesh proxy connection")
+                raise NoMeshLink("no mesh proxy connection")
             commands = NodeCommands(link, record.node, record.quirks, self._tids)
             try:
                 await action(commands)

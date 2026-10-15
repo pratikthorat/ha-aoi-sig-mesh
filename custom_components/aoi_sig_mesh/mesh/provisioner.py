@@ -27,7 +27,9 @@ PUBLIC_KEY_TIMEOUT = 15.0
 CONFIRMATION_TIMEOUT = 10.0
 RANDOM_TIMEOUT = 10.0
 COMPLETE_TIMEOUT = 15.0
-PROVISIONING_CONNECT_TIMEOUT = 30.0  # the connect and the attach (with its notify enable)
+# A backstop above the radio's own bounds: its 3 connect attempts of 20 s each, plus 5 s for
+# the notify enable. It covers the connect and the attach together.
+PROVISIONING_CONNECT_TIMEOUT = 65.0
 INBOX_SIZE = 16  # PDUs queued from the device; a well-behaved one sends one at a time
 START_DELAY = 0.5  # some devices drop a Public Key sent right after Start
 ATTENTION_SECONDS = 5  # the device blinks or beeps while it is being provisioned

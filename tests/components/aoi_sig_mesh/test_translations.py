@@ -81,6 +81,7 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config_subentries.node.error.reset_failed",
         "config_subentries.node.error.reset_not_running",
         "config_subentries.node.error.reset_no_proxy",
+        "config_subentries.node.error.reset_not_saved",
         "config_subentries.node.abort.setup_again_started",
         "config_subentries.node.abort.device_reset",
         "config_subentries.node.abort.device_removed",
@@ -179,7 +180,11 @@ def test_provisioning_texts_use_only_the_placeholders_the_flow_passes() -> None:
         node["abort"]["device_removed"],
     ):
         assert placeholders(text) == {"name"}
-    for key in ("reset_not_running", "reset_no_proxy"):  # the flow passes {name}; unused here
+    for key in (
+        "reset_not_running",
+        "reset_no_proxy",
+        "reset_not_saved",
+    ):  # the flow passes {name}; unused here
         assert placeholders(node["error"][key]) == set()
 
 
