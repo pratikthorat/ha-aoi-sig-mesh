@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
 
@@ -10,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from custom_components.aoi_sig_mesh.const import CONF_APP_KEY, CONF_NET_KEY
 from custom_components.aoi_sig_mesh.diagnostics import async_get_config_entry_diagnostics
 from tests.sim.mesh_sim import APP_KEY, NET_KEY, SimNode
-from tests.sim.sim_radio import SimRadio
+from tests.sim.sim_radio import BULB_MAC, SimRadio
 
 from .conftest import until
 
@@ -22,6 +23,8 @@ def _assert_no_keys(result: dict[str, Any], bulb: SimNode) -> None:
     for key in (NET_KEY, APP_KEY, bulb.dev_key):
         assert key.hex() not in dumped
         assert key.hex().upper() not in dumped
+        assert json.dumps(list(key))[1:-1] not in dumped  # as a list of byte values
+        assert base64.b64encode(key).decode() not in dumped
 
 
 async def test_diagnostics_redact_every_key(
@@ -36,6 +39,8 @@ async def test_diagnostics_redact_every_key(
     assert result["entry"]["data"][CONF_APP_KEY] == REDACTED
     subentry = result["entry"]["subentries"][0]
     assert subentry["data"]["dev_key"] == REDACTED
+    assert subentry["data"]["mac"] == REDACTED  # a device identifier (HA convention)
+    assert BULB_MAC.lower() not in json.dumps(result["entry"]).lower()
     assert result["connection"]["connected"] is True
     assert result["nodes"]["Desk lamp"]["unicast"] == "0x00B0"
     assert result["network"]["state"]["seq"] > 0

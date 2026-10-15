@@ -8,10 +8,11 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
 from . import AoiConfigEntry
-from .const import CONF_APP_KEY, CONF_NET_KEY
+from .const import CONF_APP_KEY, CONF_MAC, CONF_NET_KEY
 
-# "dev_key" is MeshNode.to_dict()'s key in every node subentry.
-TO_REDACT = {CONF_NET_KEY, CONF_APP_KEY, "dev_key"}
+# "dev_key" is MeshNode.to_dict()'s key in every node subentry. A MAC is no secret, but it
+# identifies the device, and HA diagnostics redact those.
+TO_REDACT = {CONF_NET_KEY, CONF_APP_KEY, "dev_key", CONF_MAC}
 
 
 async def async_get_config_entry_diagnostics(

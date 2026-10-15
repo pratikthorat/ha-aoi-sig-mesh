@@ -66,7 +66,11 @@ NETWORK_ID = NetworkKeys.from_net_key(NET_KEY).network_id.hex()
 
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations: None, hass: HomeAssistant) -> None:
-    """Load custom_components/, and count bluetooth as set up (it cannot start on macOS)."""
+    """Load custom_components/, and count bluetooth as set up (it cannot start on macOS).
+
+    Every test here gets this, so bluetooth's real setup never runs: a test that needs it
+    (the manager, real scanners) must override this fixture in its own module.
+    """
     hass.config.components.add("bluetooth")
 
 

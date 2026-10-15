@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+from unittest.mock import patch
+
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_MAX_COLOR_TEMP_KELVIN,
@@ -17,6 +20,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.aoi_sig_mesh.const import DOMAIN, TUYA_DOMAIN
+from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
 from tests.sim.mesh_sim import APP_KEY, NET_KEY, SimMesh
 from tests.sim.sim_radio import SimRadio
 
@@ -59,24 +63,33 @@ async def test_the_bulb_migrates_and_works(
     )
     source.add_to_hass(hass)
 
-    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"next_step_id": "tuya_import"}
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"source_entry": source.entry_id, "name": "Home mesh"}
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"disable_old": True}
-    )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    entry = result["result"]
-    first = entry.runtime_data
+    made: list[MeshCoordinator] = []  # one per setup: the first, then each reload
 
-    # First connect: AppKey, bindings, publications to us, Composition and the real range.
-    await until(lambda: next(iter(entry.subentries.values())).data["configured"] is True)
-    await until(lambda: entry.runtime_data is not first and entry.runtime_data.connected)
-    await hass.async_block_till_done()
+    def counted(*args: Any, **kwargs: Any) -> MeshCoordinator:
+        made.append(MeshCoordinator(*args, **kwargs))
+        return made[-1]
+
+    with patch("custom_components.aoi_sig_mesh.MeshCoordinator", side_effect=counted):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "tuya_import"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"source_entry": source.entry_id, "name": "Home mesh"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"disable_old": True}
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        entry = result["result"]
+        first = entry.runtime_data
+        # Imported unconfigured: the first connect must do the AppKey and bindings.
+        assert next(iter(entry.subentries.values())).data["configured"] is False
+
+        # First connect: AppKey, bindings, publications to us, Composition and the real range.
+        await until(lambda: next(iter(entry.subentries.values())).data["configured"] is True)
+        await until(lambda: entry.runtime_data is not first and entry.runtime_data.connected)
+        await hass.async_block_till_done()
 
     assert source.disabled_by is ConfigEntryDisabler.USER
     assert bulb.has_app_key
@@ -89,7 +102,9 @@ async def test_the_bulb_migrates_and_works(
         LIGHT_DOMAIN, SERVICE_TURN_ON, {ATTR_ENTITY_ID: LAMP, ATTR_BRIGHTNESS: 64}, blocking=True
     )
     assert bulb.on and bulb.lightness == 64 * 257
+    assert hass.states.get(LAMP).state == "on"  # so "off" below is the wall switch's doing
 
     sim.local_change(bulb, False, dst=OURS)  # the wall switch, published to us
     await until(lambda: hass.states.get(LAMP).state == "off")
+    assert made == [first, entry.runtime_data]  # set up, then reloaded exactly once
     await hass.config_entries.async_unload(entry.entry_id)
