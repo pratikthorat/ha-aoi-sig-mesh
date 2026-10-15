@@ -17,7 +17,11 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.aoi_sig_mesh import coordinator as coordinator_module
 from custom_components.aoi_sig_mesh.const import CONF_CONFIGURED, CONF_MAC, CONF_ROLE, DOMAIN
-from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
+from custom_components.aoi_sig_mesh.coordinator import (
+    MeshCoordinator,
+    claimed_range,
+    read_node,
+)
 from custom_components.aoi_sig_mesh.mesh.config import OP_MODEL_APP_BIND
 from custom_components.aoi_sig_mesh.mesh.configure import ConfigureError
 from custom_components.aoi_sig_mesh.mesh.errors import SeqNotSaved
@@ -406,6 +410,49 @@ async def test_a_bad_mac_or_role_skips_the_node_with_an_issue(
     assert issue is not None
     assert issue.translation_placeholders["names"] == "Hall plug"
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_an_explicit_role_of_none_is_treated_as_missing(
+    hass: HomeAssistant, bulb: SimNode, radio: SimRadio
+) -> None:
+    entry = make_entry(("Desk lamp", {**node_data(bulb), CONF_ROLE: None}))
+
+    coordinator = await setup_entry(hass, entry)
+
+    record = next(iter(coordinator.nodes.values()))
+    assert record.role == "light"
+    assert not coordinator.needs_reload()
+    assert hass.states.get("light.desk_lamp") is not None
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"element_count": float("inf")},
+        {"kelvin_min": float("-inf")},
+        {"models": {"onoff": float("inf")}},
+    ],
+)
+async def test_an_infinite_number_skips_the_node_with_an_issue(
+    hass: HomeAssistant, bulb: SimNode, radio: SimRadio, damage: dict[str, Any]
+) -> None:
+    plug = {**node_data(bulb), "unicast": 0x00C0, **damage}
+    entry = make_entry(("Desk lamp", node_data(bulb)), ("Hall plug", plug))
+
+    coordinator = await setup_entry(hass, entry)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert [record.title for record in coordinator.nodes.values()] == ["Desk lamp"]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"node_unreadable_{entry.entry_id}")
+    assert issue is not None
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+def test_claimed_range_reads_past_an_infinite_number(bulb: SimNode) -> None:
+    assert read_node({**node_data(bulb), "unicast": float("inf")}) is None
+    assert claimed_range({"unicast": float("inf"), "element_count": 1}) is None
+    assert claimed_range({"unicast": 0x00C0, "element_count": float("inf")}) == (0x00C0, 1)
 
 
 async def test_replay_entries_of_a_damaged_node_are_kept(

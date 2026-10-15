@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any
 
+import pytest
 from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER, ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -269,4 +270,35 @@ async def test_a_damaged_sibling_does_not_cause_a_reload(
 
     assert entry.runtime_data is coordinator
     assert not coordinator.needs_reload()
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def _form_default_role(hass: HomeAssistant, entry: Any, subentry_id: str) -> Any:
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_NODE),
+        context={"source": SOURCE_RECONFIGURE, "subentry_id": subentry_id},
+    )
+    assert result["type"] is FlowResultType.FORM
+    (key,) = result["data_schema"].schema
+    return key.default()
+
+
+@pytest.mark.parametrize(
+    ("kind", "stored", "expected"),
+    [
+        ("ctl", "fan", "light"),  # unreadable node: light
+        ("ctl", 7, "light"),
+        ("onoff", None, "switch"),  # an explicit None is missing: what the node is
+        ("ctl", None, "light"),
+        ("ctl", "switch", "switch"),  # a valid stored role is kept
+    ],
+)
+async def test_reconfigure_defaults_to_the_stored_role_only_when_it_is_valid(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio, kind: str, stored: Any, expected: str
+) -> None:
+    node = sim.add_node(kind, unicast=0x00C0)
+    entry = make_entry(("Hall node", {**node_data(node), "role": stored}))
+    await setup_entry(hass, entry)
+
+    assert await _form_default_role(hass, entry, next(iter(entry.subentries))) == expected
     await hass.config_entries.async_unload(entry.entry_id)

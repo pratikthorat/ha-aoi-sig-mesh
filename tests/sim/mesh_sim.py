@@ -165,6 +165,7 @@ class SimNode:
     refuse_bind: set[int] = field(default_factory=set)  # model IDs answered Invalid Model
     refuse_publication: set[int] = field(default_factory=set)
     range_on_temp_element: bool = False  # CTL Temperature Range answered by element 1
+    health: bool | None = None  # Health Server: None = the kind's default (all but "onoff")
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -173,6 +174,10 @@ class SimNode:
     @property
     def element_count(self) -> int:
         return 2 if self.kind == "ctl" else 1
+
+    @property
+    def has_health(self) -> bool:
+        return self.kind != "onoff" if self.health is None else self.health
 
     @property
     def present_lightness(self) -> int:
@@ -186,15 +191,16 @@ class SimNode:
                     self.bindings.add((self.unicast + index, model))
 
     def composition(self) -> CompositionData:
+        primary = (0x0000, 0x0002) if self.has_health else (0x0000,)
         if self.kind == "ctl":
             elements = (
-                Element(0, (0x0000, 0x0002, 0x1000, 0x1300, 0x1303), (TUYA_VENDOR_MODEL,)),
+                Element(0, (*primary, 0x1000, 0x1300, 0x1303), (TUYA_VENDOR_MODEL,)),
                 Element(0, (0x1306,), ()),
             )
         elif self.kind == "lightness":
-            elements = (Element(0, (0x0000, 0x0002, 0x1000, 0x1300), ()),)
+            elements = (Element(0, (*primary, 0x1000, 0x1300), ()),)
         else:
-            elements = (Element(0, (0x0000, 0x1000), ()),)
+            elements = (Element(0, (*primary, 0x1000), ()),)
         return CompositionData(0, 0x07D0, 0x0280, 0x3737, 10, 3, elements)
 
     def handle(self, dst: int, access: bytes, *, dev_key: bool) -> list[tuple[int, bytes]]:
@@ -301,9 +307,7 @@ class SimNode:
             if opcode != OP_ONOFF_GET:
                 self.on = bool(params[0])
             return self._reply(opcode, OP_ONOFF_SET_UNACK, OP_ONOFF_STATUS, bytes([int(self.on)]))
-        if self.kind == "onoff":
-            return []
-        if opcode in (
+        if self.has_health and opcode in (
             OP_HEALTH_ATTENTION_GET,
             OP_HEALTH_ATTENTION_SET,
             OP_HEALTH_ATTENTION_SET_UNACK,
@@ -318,6 +322,8 @@ class SimNode:
                 OP_HEALTH_ATTENTION_STATUS,
                 bytes([self.attention]),
             )
+        if self.kind == "onoff":
+            return []
         if opcode in (OP_LIGHTNESS_GET, OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK):
             if opcode != OP_LIGHTNESS_GET:
                 self._set_level(struct.unpack_from("<H", params)[0])
@@ -459,6 +465,7 @@ class SimMesh:
         unicast: int | None = None,
         tuya_quirks: bool = False,
         configured: bool = True,
+        health: bool | None = None,
     ) -> SimNode:
         if unicast is None:
             unicast = max(
@@ -471,6 +478,7 @@ class SimMesh:
             kind=kind,
             tuya_quirks=tuya_quirks,
             has_app_key=configured,
+            health=health,
         )
         if configured:
             node.bind_all()

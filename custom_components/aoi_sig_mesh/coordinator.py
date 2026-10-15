@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -73,8 +73,8 @@ CONFIGURE_TIMEOUT = 90.0
 FOLLOW_UP_MARGIN = 0.5  # seconds after a transition ends before reading the final state
 
 
-# What MeshNode.from_dict raises for a damaged subentry.
-NODE_DATA_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
+# What MeshNode.from_dict raises for a damaged subentry (OverflowError: int() of an infinity).
+NODE_DATA_ERRORS = (KeyError, TypeError, ValueError, AttributeError, OverflowError)
 
 
 ROLES = (ROLE_LIGHT, ROLE_SWITCH)
@@ -113,6 +113,15 @@ def claimed_range(data: Any) -> tuple[int, int] | None:
 
 def default_role(node: MeshNode) -> str:
     return ROLE_LIGHT if node.is_light else ROLE_SWITCH
+
+
+def node_role(data: Mapping[str, Any], node: MeshNode | None) -> str:
+    """The stored role if it is one we know (an explicit None is missing), else what the node
+    is; light when the node is unreadable."""
+    role = data.get(CONF_ROLE)
+    if isinstance(role, str) and role in ROLES:
+        return role
+    return default_role(node) if node is not None else ROLE_LIGHT
 
 
 def capabilities(node: MeshNode) -> tuple[Any, ...]:
@@ -208,7 +217,7 @@ class MeshCoordinator:
                 subentry_id=subentry_id,
                 title=subentry.title,
                 node=node,
-                role=subentry.data.get(CONF_ROLE, default_role(node)),
+                role=node_role(subentry.data, node),
                 mac=(subentry.data.get(CONF_MAC) or "").upper() or None,
                 configured=bool(subentry.data.get(CONF_CONFIGURED, False)),
                 quirks=quirks_for(node.cid, node.pid),
@@ -252,9 +261,7 @@ class MeshCoordinator:
                 continue
             node = read_node(subentry.data)
             nodes[subentry_id] = (
-                (subentry.data.get(CONF_ROLE, default_role(node)), *capabilities(node))
-                if node is not None
-                else ()
+                (node_role(subentry.data, node), *capabilities(node)) if node is not None else ()
             )
         return dict(entry.options), nodes
 
@@ -677,6 +684,7 @@ class MeshCoordinator:
         self.hass.config_entries.async_update_subentry(self.entry, subentry, data=data)
         self._update_device_info(record)
 
+    @callback
     def _update_device_info(self, record: NodeRecord) -> None:
         """Composition supplies manufacturer, model and version without a reload."""
         registry = dr.async_get(self.hass)
@@ -801,6 +809,8 @@ class MeshCoordinator:
         finally:
             if before is not None:  # begun with _begin
                 record.pending -= 1
+        if before is not None and record.pending == 0:
+            self._settle(record)
         self.manager.touch()
 
     async def _async_command_link(self) -> ProxyLink | None:
@@ -839,6 +849,18 @@ class MeshCoordinator:
         record.pending += 1
         self._notify(record.subentry_id)
         return record.generation
+
+    @callback
+    def _settle(self, record: NodeRecord) -> None:
+        """The last pending command succeeded: show what the node said.
+
+        Every optimistic command is acknowledged, so its status is already in ``confirmed``;
+        what is left in ``state`` is an older failed command's optimism (a status may carry
+        only some fields, e.g. the temperature but not the brightness).
+        """
+        if record.state != record.confirmed:
+            record.state = replace(record.confirmed)
+            self._notify(record.subentry_id)
 
     @callback
     def _revert(self, record: NodeRecord, before: NodeState | None, generation: int) -> None:

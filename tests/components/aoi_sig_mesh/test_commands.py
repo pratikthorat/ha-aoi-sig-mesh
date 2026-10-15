@@ -413,3 +413,42 @@ async def test_two_overlapping_failures(
     assert bulb.on is False
     assert record.state.on is False
     assert record.state == record.confirmed
+
+
+async def test_an_older_failure_under_a_newer_success_settles_on_what_the_bulb_said(
+    hass: HomeAssistant, bulb: SimNode, bulb_entry: Any
+) -> None:
+    """A (75 %) fails while B (4000 K only) is pending; B's status carries only the temperature.
+
+    A's optimistic brightness must not outlive B: the bulb is still at 25 %.
+    """
+    coordinator, sid = lamp(bulb_entry)
+    await coordinator.async_turn_on(sid, lightness=0x4000, kelvin=3000)
+    record = coordinator.nodes[sid]
+    real_turn_on = NodeCommands.turn_on
+    gates = {"A": asyncio.Event(), "B": asyncio.Event()}
+    entered: set[str] = set()
+
+    async def gated(self: NodeCommands, **kwargs: Any) -> None:
+        name = "A" if kwargs.get("lightness") is not None else "B"
+        entered.add(name)
+        await gates[name].wait()
+        if name == "A":
+            raise MeshTimeout("no answer")
+        await real_turn_on(self, **kwargs)
+
+    with patch.object(NodeCommands, "turn_on", gated):
+        commands = {"A": hass.async_create_task(coordinator.async_turn_on(sid, lightness=0xBFFF))}
+        await until(lambda: "A" in entered)
+        commands["B"] = hass.async_create_task(coordinator.async_turn_on(sid, kelvin=4000))
+        await until(lambda: "B" in entered)
+        assert (record.state.lightness, record.state.kelvin) == (0xBFFF, 4000)  # both optimistic
+        gates["A"].set()
+        with pytest.raises(HomeAssistantError):
+            await commands["A"]
+        gates["B"].set()
+        await commands["B"]
+
+    assert (bulb.lightness, bulb.kelvin) == (0x4000, 4000)
+    assert record.state == record.confirmed
+    assert (record.state.lightness, record.state.kelvin) == (0x4000, 4000)

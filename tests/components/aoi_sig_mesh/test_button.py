@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
 from homeassistant.components.button import SERVICE_PRESS
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
 
 from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
+from custom_components.aoi_sig_mesh.mesh.control import BLINKS
+from custom_components.aoi_sig_mesh.mesh.models import OP_ONOFF_SET, OP_ONOFF_SET_UNACK
 from tests.sim.mesh_sim import SimMesh, SimNode
 from tests.sim.sim_radio import SimRadio
 
@@ -49,8 +52,55 @@ async def test_plug_without_health_has_no_identify_button(
     coordinator = await setup_entry(
         hass, make_entry(("Kitchen plug", node_data(plug, mac=PLUG_MAC)))
     )
-    await until(lambda: coordinator.connected)
+    try:
+        await until(lambda: coordinator.connected)
 
-    assert hass.states.get("button.kitchen_plug_identify") is None
-    assert hass.states.get("button.home_mesh_reconnect") is not None
-    await hass.config_entries.async_unload(coordinator.entry.entry_id)
+        assert hass.states.get("button.kitchen_plug_identify") is None
+        assert hass.states.get("button.home_mesh_reconnect") is not None
+    finally:
+        await hass.config_entries.async_unload(coordinator.entry.entry_id)
+
+
+async def test_plug_with_health_gets_an_identify_button_that_uses_attention(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    plug = sim.add_node("onoff", unicast=0x00C0, health=True)
+    radio.advertise(PLUG_MAC)
+    coordinator = await setup_entry(
+        hass, make_entry(("Kitchen plug", node_data(plug, mac=PLUG_MAC)))
+    )
+    try:
+        await until(lambda: coordinator.connected)
+        assert hass.states.get("button.kitchen_plug_identify") is not None
+
+        await press(hass, "button.kitchen_plug_identify")
+
+        await until(lambda: plug.attention == 5)
+        assert plug.on is False  # never toggled: whatever is plugged in stays as it was
+        assert not [r for r in plug.received if r[1] in (OP_ONOFF_SET, OP_ONOFF_SET_UNACK)]
+    finally:
+        await hass.config_entries.async_unload(coordinator.entry.entry_id)
+
+
+@pytest.mark.parametrize("on", [True, False])
+async def test_a_light_without_health_blinks_and_ends_as_it_was(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio, on: bool
+) -> None:
+    lamp = sim.add_node("lightness", unicast=0x00C0, health=False)
+    lamp.on = on
+    radio.advertise(PLUG_MAC)
+    entry = make_entry(("Hall lamp", node_data(lamp, mac=PLUG_MAC)))
+    coordinator = await setup_entry(hass, entry)
+    try:
+        record = next(iter(coordinator.nodes.values()))
+        await until(lambda: coordinator.connected and record.confirmed.on is on)
+        lamp.received.clear()
+
+        await press(hass, "button.hall_lamp_identify")
+
+        blinks = [r for r in lamp.received if r[1] == OP_ONOFF_SET_UNACK]
+        assert [bool(params[0]) for _, _, params in blinks] == [not on, on] * BLINKS
+        assert lamp.on is on
+        assert lamp.attention == 0
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)

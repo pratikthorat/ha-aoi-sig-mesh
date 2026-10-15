@@ -59,7 +59,7 @@ from .const import (
     SUBENTRY_NODE,
     TUYA_DOMAIN,
 )
-from .coordinator import claimed_range, default_role, read_node
+from .coordinator import claimed_range, default_role, node_role, read_node
 from .mesh.importers import (
     NODE_RANGE_HIGH,
     NODE_RANGE_LOW,
@@ -353,13 +353,11 @@ class NodeSubentryFlow(ConfigSubentryFlow):
                 subentry,
                 data_updates={CONF_ROLE: user_input[CONF_ROLE]},
             )
-        node = read_node(subentry.data)
-        fallback = default_role(node) if node is not None else ROLE_LIGHT
+        # a stored role that is not light or switch (damaged data) must not become the default
+        role = node_role(subentry.data, read_node(subentry.data))
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_ROLE, default=subentry.data.get(CONF_ROLE, fallback)
-                ): SelectSelector(
+                vol.Required(CONF_ROLE, default=role): SelectSelector(
                     SelectSelectorConfig(
                         options=[ROLE_LIGHT, ROLE_SWITCH], translation_key=CONF_ROLE
                     )
