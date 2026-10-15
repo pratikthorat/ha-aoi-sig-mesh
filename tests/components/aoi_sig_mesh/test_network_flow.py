@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -16,6 +19,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.aoi_sig_mesh.const import DOMAIN, TUYA_DOMAIN
+from custom_components.aoi_sig_mesh.mesh import importers
 from custom_components.aoi_sig_mesh.mesh.pdu import NetworkKeys
 from custom_components.aoi_sig_mesh.store import AddressBook, _StrictStore
 from tests.mesh.test_nrf_import import BULB_KEY, PLUG_KEY, export
@@ -133,6 +137,18 @@ async def test_a_reimport_never_reuses_our_old_address(hass: HomeAssistant) -> N
         (json.dumps({**export(), "netKeys": []}), "nrf_bad_keys"),
         (json.dumps({**export(), "appKeys": []}), "nrf_no_app_key"),
         (json.dumps({**export(), "ivIndex": -1}), "nrf_bad_iv_index"),
+        (
+            json.dumps(
+                {**export(), "netKeys": [{**export()["netKeys"][0], "phase": 1}]},
+            ),
+            "nrf_key_refresh",
+        ),
+        (
+            json.dumps(
+                {**export(), "nodes": [{**export()["nodes"][1], "unicastAddress": "ZZZZ"}]},
+            ),
+            "nrf_bad_address",
+        ),
     ],
 )
 async def test_a_bad_export_shows_why_and_keeps_the_form(
@@ -199,3 +215,58 @@ async def test_an_imported_network_runs_and_sets_up_the_unbound_plug(
     assert hass.states.get("light.desk_lamp") is not None
     assert lamp.received  # read with the exported bindings, no setup needed
     await hass.config_entries.async_unload(result["result"].entry_id)
+
+
+@pytest.mark.usefixtures("no_setup")
+async def test_create_uses_the_generated_keys_and_never_logs_them(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    with patch(
+        "custom_components.aoi_sig_mesh.config_flow.secrets.token_bytes",
+        side_effect=[NET_KEY, APP_KEY],
+    ):
+        result = await create(hass)
+
+    entry = result["result"]
+    assert entry.unique_id == NETWORK_ID
+    assert (entry.data["net_key"], entry.data["app_key"]) == (NET_KEY.hex(), APP_KEY.hex())
+    for key in (NET_KEY, APP_KEY):
+        assert key.hex() not in caplog.text.lower()
+
+
+async def test_nrf_import_without_a_saved_address_aborts_and_keeps_the_ignored_entry(
+    hass: HomeAssistant,
+) -> None:
+    ignored = MockConfigEntry(domain=DOMAIN, unique_id=NETWORK_ID, source=SOURCE_IGNORE)
+    ignored.add_to_hass(hass)
+
+    with patch.object(_StrictStore, "async_save_strict", AsyncMock(side_effect=OSError("disk"))):
+        result = await nrf_import(hass, json.dumps(export()))
+
+    assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "cannot_save")
+    assert [(e.entry_id, e.source) for e in hass.config_entries.async_entries(DOMAIN)] == [
+        (ignored.entry_id, SOURCE_IGNORE)
+    ]
+
+
+@pytest.mark.usefixtures("no_setup")
+async def test_a_reimport_never_picks_an_address_a_node_already_holds(
+    hass: HomeAssistant,
+) -> None:
+    await AddressBook(hass).async_add_nodes(NETWORK_ID, [(0x7F00, 1)])
+
+    result = await nrf_import(hass, json.dumps(export()))
+
+    assert result["result"].data["address"] == 0x7F01
+
+
+def test_every_reason_the_importer_can_raise_has_an_error_string() -> None:
+    reasons = set(re.findall(r'NrfImportError\(\s*"(\w+)"', inspect.getsource(importers)))
+    assert {"bad_json", "bad_keys", "key_refresh", "bad_address", "no_address"} <= reasons
+    errors = json.loads(
+        (Path(__file__).parents[3] / "custom_components/aoi_sig_mesh/strings.json").read_text()
+    )["config"]["error"]
+    for reason in reasons:
+        key = "no_address" if reason == "no_address" else f"nrf_{reason}"
+        assert errors.get(key), f"{key} has no string"

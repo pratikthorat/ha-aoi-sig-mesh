@@ -254,9 +254,13 @@ class ProvisionSteps:
             if not claim_device(self.hass, address):
                 self._failure = ProvisionFailed("already_provisioning", "", "")
                 return await self._async_form()
-            self._task = self.hass.async_create_task(
-                self._async_provision(self._device), "aoi_sig_mesh provisioning"
-            )
+            coroutine = self._async_provision(self._device)
+            try:
+                self._task = self.hass.async_create_task(coroutine, "aoi_sig_mesh provisioning")
+            except BaseException:
+                coroutine.close()  # never started: no "never awaited" warning
+                release_device(self.hass, address)  # the done callback will never run
+                raise
             # runs on success, failure and cancel (the dialog was closed)
             self._task.add_done_callback(lambda _task: release_device(self.hass, address))
         if not self._task.done():
@@ -551,7 +555,8 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
         if existing is not None:
             return self.async_abort(reason="already_configured")
         await self.async_set_unique_id(network_id, raise_on_progress=False)
-        used = await AddressBook(self.hass).async_used(network_id)
+        book = AddressBook(self.hass)
+        used = [*await book.async_used(network_id), *await book.async_used_nodes(network_id)]
         return import_nrf_json(text, used_addresses=used)
 
     async def _async_create_nrf_entry(self, result: NrfImport) -> ConfigFlowResult:

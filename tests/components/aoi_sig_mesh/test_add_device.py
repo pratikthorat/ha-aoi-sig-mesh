@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
@@ -333,3 +334,21 @@ async def test_closing_the_dialog_cancels_provisioning_and_frees_the_device(
 
     await until(lambda: not device._transport.is_connected)
     await until(lambda: hass.data[DOMAIN]["provisioning"] == set())
+
+
+async def test_a_task_that_cannot_be_created_frees_the_device_and_raises(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any
+) -> None:
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, name="Plug"))
+    real = hass.async_create_task
+
+    def create_task(target: Any, name: str | None = None, *args: Any, **kwargs: Any) -> Any:
+        if name == "aoi_sig_mesh provisioning":
+            raise RuntimeError("no task for you")
+        return real(target, name, *args, **kwargs)
+
+    result = await open_add(hass, bulb_entry)
+    with patch.object(hass, "async_create_task", create_task), pytest.raises(Exception):  # noqa: B017, PT011
+        await pick(hass, result["flow_id"], PLUG_MAC)
+
+    assert hass.data[DOMAIN]["provisioning"] == set()

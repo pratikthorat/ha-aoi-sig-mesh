@@ -180,3 +180,31 @@ def test_provisioning_texts_use_only_the_placeholders_the_flow_passes() -> None:
 def test_exceptions_name_the_device() -> None:
     for key in ("not_connected", "command_failed", "seq_not_saved"):
         assert placeholders(STRINGS["exceptions"][key]["message"]) == {"name"}
+
+
+def test_unknown_shows_the_detail_everywhere() -> None:
+    node = STRINGS["config_subentries"]["node"]
+    for text in (
+        STRINGS["config"]["error"]["unknown"],
+        STRINGS["config"]["abort"]["unknown"],
+        node["error"]["unknown"],
+        node["abort"]["unknown"],
+    ):
+        assert placeholders(text) == {"detail"}
+
+
+def test_the_network_gone_text_fits_every_path() -> None:
+    text = STRINGS["config"]["abort"]["network_gone"]
+    assert "import" not in text.lower()
+    assert text == "The network was removed while this form was open. Start again."
+
+
+def test_texts_shared_by_the_config_and_device_flows_are_the_same() -> None:
+    config, node = STRINGS["config"], STRINGS["config_subentries"]["node"]
+    for kind in ("error", "abort"):
+        for key in config[kind].keys() & node[kind].keys():
+            assert config[kind][key] == node[kind][key] or key == "cannot_save", (kind, key)
+    for key in config["error"].keys() & node["abort"].keys():
+        if key in ("provision_failed", "provision_failed_remote"):
+            continue  # the form text says "try again here"; the abort says the device left
+        assert config["error"][key] == node["abort"][key], key
