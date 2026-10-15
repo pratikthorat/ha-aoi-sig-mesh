@@ -699,7 +699,7 @@ class MeshCoordinator:
             node.kelvin_min,
             node.kelvin_max,
         )
-        was_light = record.node.is_light
+        was_light, had_models = record.node.is_light, bool(record.node.models)
         record.node = node
         record.configured = True
         record.quirks = quirks_for(node.cid, node.pid)
@@ -707,8 +707,10 @@ class MeshCoordinator:
         data = {**subentry.data, **node.to_dict(), CONF_CONFIGURED: True}
         if capabilities(node) != before:
             _LOGGER.info("%s: Composition changed its capabilities", record.title)
-        if node.is_light != was_light:
-            # only a change of what the node is re-derives the role; a chosen one stays
+        stored = subentry.data.get(CONF_ROLE)
+        if stored not in ROLES or (had_models and node.is_light != was_light):
+            # Automatic (no role yet), or a change of what an imported node is: the role
+            # follows the node. A role chosen for a node whose models were unknown stays.
             record.role = default_role(node)
             data[CONF_ROLE] = record.role
         self.hass.config_entries.async_update_subentry(self.entry, subentry, data=data)

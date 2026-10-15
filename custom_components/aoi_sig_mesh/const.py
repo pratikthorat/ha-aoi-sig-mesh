@@ -31,11 +31,13 @@ CONF_MAC: Final = "mac"
 CONF_CONFIGURED: Final = "configured"
 ROLE_LIGHT: Final = "light"
 ROLE_SWITCH: Final = "switch"
+ROLE_AUTO: Final = "auto"  # Add device: light if the node has Lightness, else switch
 
 # config flow
 CONF_SOURCE_ENTRY: Final = "source_entry"
 CONF_DISABLE_OLD: Final = "disable_old"
 CONF_NRF_JSON: Final = "nrf_json"
+CONF_DEVICE: Final = "device"
 NEW_NETWORK_ADDRESS: Final = 0x0001  # Home Assistant's unicast in a network it creates
 TUYA_DOMAIN: Final = "tuya_ble_mesh"
 DEFAULT_NETWORK_NAME: Final = "Home mesh"

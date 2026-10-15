@@ -74,10 +74,12 @@ class SimRadio:
         self.adverts.pop(device.address, None)
 
     def unprovisioned(self) -> list[UnprovisionedDevice]:
-        return [
+        """Like HaBluetoothRadio.unprovisioned: strongest first."""
+        found = [
             UnprovisionedDevice(address, device.name, rssi, device.uuid, device.oob_info, remote)
             for address, (device, rssi, remote) in self._unprovisioned.items()
         ]
+        return sorted(found, key=lambda d: -999 if d.rssi is None else d.rssi, reverse=True)
 
     async def connect_provisioning(self, address: str) -> ProvisioningLoopback:
         self.provisioning_connects.append(address)

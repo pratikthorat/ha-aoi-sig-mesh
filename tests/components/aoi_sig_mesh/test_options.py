@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 from homeassistant.config_entries import (
     SOURCE_RECONFIGURE,
-    SOURCE_USER,
     ConfigEntryState,
     ConfigSubentry,
 )
@@ -82,17 +81,6 @@ async def test_changing_the_role_back_leaves_one_light_and_no_switch(
     ]
     assert hass.states.get("light.desk_lamp") is not None
     assert hass.states.get("switch.desk_lamp") is None
-
-
-async def test_adding_devices_from_the_subentry_menu_points_to_the_import(
-    hass: HomeAssistant, bulb_entry: Any
-) -> None:
-    result = await hass.config_entries.subentries.async_init(
-        (bulb_entry.entry_id, SUBENTRY_NODE), context={"source": SOURCE_USER}
-    )
-
-    assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "add_by_import"
 
 
 async def test_adding_and_removing_a_node_reloads_the_network(

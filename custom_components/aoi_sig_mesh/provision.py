@@ -6,10 +6,20 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import CONF_NET_KEY, CONF_NET_KEY_INDEX, CONF_RANGE_HIGH, CONF_RANGE_LOW
+from .const import (
+    CONF_ADDRESS,
+    CONF_IV_INDEX,
+    CONF_NET_KEY,
+    CONF_NET_KEY_INDEX,
+    CONF_RANGE_HIGH,
+    CONF_RANGE_LOW,
+    SUBENTRY_NODE,
+)
+from .coordinator import claimed_range
 from .mesh.errors import MeshError, ProvisioningError
 from .mesh.pdu import NetworkKeys
 from .mesh.provisioner import (
@@ -22,7 +32,7 @@ from .mesh.provisioner import (
     provision_device,
 )
 from .radio import HaBluetoothRadio
-from .store import AddressBook
+from .store import AddressBook, NetworkStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +54,27 @@ class ProvisionFailed(Exception):
 def async_unprovisioned(hass: HomeAssistant) -> list[UnprovisionedDevice]:
     """Factory-reset nodes in range of any connectable adapter or proxy, strongest first."""
     return HaBluetoothRadio(hass).unprovisioned()
+
+
+def entry_taken(entry: ConfigEntry) -> list[tuple[int, int]]:
+    """Our address and every node block of ``entry``, as damaged data allows."""
+    taken = [(int(entry.data[CONF_ADDRESS]), 1)]
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type == SUBENTRY_NODE and (block := claimed_range(subentry.data)):
+            taken.append(block)
+    return taken
+
+
+async def async_entry_iv(hass: HomeAssistant, entry: ConfigEntry) -> tuple[int, bool]:
+    """(IV index, IV Update) a new device must be given: the running network's, else the
+    saved state's, else the entry's."""
+    if entry.state is ConfigEntryState.LOADED:
+        network = entry.runtime_data.network
+        return network.iv_index, network.iv_update
+    state = await NetworkStore(hass, entry.entry_id).async_load()
+    if state is not None:
+        return int(state["iv_index"]), bool(state.get("iv_update", False))
+    return int(entry.data.get(CONF_IV_INDEX, 0)), False
 
 
 async def async_provision_device(

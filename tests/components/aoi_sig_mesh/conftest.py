@@ -186,5 +186,6 @@ async def bulb_entry(
     await until(lambda: coordinator.connected and bulb.received)
     await until(lambda: coordinator.nodes and next(iter(coordinator.nodes.values())).last_seen)
     yield entry
+    await hass.async_block_till_done()  # a reload a subentry change started
     if entry.state is ConfigEntryState.LOADED:
         await hass.config_entries.async_unload(entry.entry_id)

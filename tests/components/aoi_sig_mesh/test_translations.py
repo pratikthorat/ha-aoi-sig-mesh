@@ -53,7 +53,17 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config_subentries.node.initiate_flow.user",
         "config_subentries.node.initiate_flow.reconfigure",
         "config_subentries.node.step.reconfigure.data.role",
-        "config_subentries.node.abort.add_by_import",
+        "config_subentries.node.step.user.data.device",
+        "config_subentries.node.step.user.data.role",
+        "config_subentries.node.progress.provision",
+        "config_subentries.node.error.provision_failed",
+        "config_subentries.node.error.provision_failed_remote",
+        "config_subentries.node.error.oob_required",
+        "config_subentries.node.error.no_address",
+        "config_subentries.node.error.cannot_save",
+        "config_subentries.node.abort.no_devices",
+        "config_subentries.node.abort.half_provisioned",
+        "selector.add_role.options.auto",
         "config_subentries.node.abort.reconfigure_successful",
         "selector.role.options.light",
         "selector.role.options.switch",
@@ -106,6 +116,14 @@ def test_the_iv_index_jump_issue_is_a_fix_flow() -> None:
         "ours",
         "theirs",
     }
+
+
+def test_provisioning_texts_use_only_the_placeholders_the_flow_passes() -> None:
+    node = STRINGS["config_subentries"]["node"]
+    for key in ("provision_failed", "provision_failed_remote"):
+        assert placeholders(node["error"][key]) == {"step", "detail"}
+    assert placeholders(node["abort"]["half_provisioned"]) == {"name", "step"}
+    assert placeholders(node["progress"]["provision"]) == {"name"}
 
 
 def test_exceptions_name_the_device() -> None:
