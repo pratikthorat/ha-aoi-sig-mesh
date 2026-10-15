@@ -400,6 +400,7 @@ class SimMesh:
         self.silent = False
         self.drop_from_client = 0
         self.reject_segments = False
+        self.drop_acks_to_client = False  # nodes take segments but their acks are lost
         self.accept_replays = False  # opt out of replay protection
         self.from_client: list[NetworkPDU] = []
         self.acks_from_client: list[SegmentAck] = []
@@ -647,7 +648,7 @@ class SimMesh:
                 )
                 return
             result = self._segments.add(net.src, net.seq, lower, iv_index=iv)
-            if result.send_ack and not self.silent:
+            if result.send_ack and not self.silent and not self.drop_acks_to_client:
                 ack_pdu = make_segment_ack(result.seq_zero, result.block_ack)
                 self._send_network(net.dst, net.src, ack_pdu, seq=next(self._seq), ctl=1)
             if result.message is None:

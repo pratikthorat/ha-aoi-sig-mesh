@@ -548,3 +548,39 @@ def test_bad_notifications_log_at_debug_only(caplog):
     with caplog.at_level(logging.DEBUG, logger="mesh.proxy"):
         run(scenario())
     assert [r for r in caplog.records if r.levelno > logging.DEBUG] == []
+
+
+class GatedTransport(LoopbackTransport):
+    """Holds the second GATT write of a PDU until ``gate`` is set."""
+
+    def __init__(self, mesh):
+        super().__init__(mesh)
+        self.gate = asyncio.Event()
+        self.second_write_started = asyncio.Event()
+
+    async def write(self, data):
+        if len(self.writes) == 1:
+            self.second_write_started.set()
+            await self.gate.wait()
+        await super().write(data)
+
+
+def test_cancelled_send_still_finishes_a_split_pdu():
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        transport = sim.transport = GatedTransport(sim)
+        _, _, link = make_link(sim, transport)
+        sending = asyncio.ensure_future(link.send(node.unicast, onoff_set(True, 1)))
+        await transport.second_write_started.wait()  # the PDU needs two 20-byte writes
+        sending.cancel()
+        await asyncio.sleep(0.01)
+        transport.gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await sending
+        return transport.writes
+
+    writes = run(scenario())
+    assert len(writes) == 2  # both parts went out
+    assert node.on  # the proxy reassembled the whole PDU

@@ -206,7 +206,13 @@ class ProxyLink:
             for _ in range(attempts):
                 # A segmented send that times out (MeshTimeout) is deliberately not retried
                 # here: send() already retransmits each segment 1 + SEGMENT_RETRANSMITS times.
-                await self.send(dst, access, dev_key=dev_key)
+                try:
+                    await self.send(dst, access, dev_key=dev_key)
+                except MeshTimeout:
+                    # Lost Segment Acks must not throw away the response that proves delivery.
+                    if future.done() and not future.cancelled() and future.exception() is None:
+                        return future.result()
+                    raise
                 try:
                     return await asyncio.wait_for(asyncio.shield(future), timeout)
                 except TimeoutError:
@@ -378,17 +384,38 @@ class ProxyLink:
         )
 
     async def _write(self, pdu_type: int, payload: bytes) -> None:
+        """Write one proxy PDU, which may take several GATT writes.
+
+        A cancellation never leaves a PDU half-written (the proxy would splice the next PDU
+        onto it): the parts are written in a shielded task that is allowed to finish, and
+        then the cancellation goes on. The write lock is held until the task is done.
+        """
+        parts = proxy_pdus(pdu_type, payload, self._transport.max_write)
         async with self._write_lock:
-            for part in proxy_pdus(pdu_type, payload, self._transport.max_write):
-                if not self.is_connected:
-                    raise LinkClosedError("proxy link is closed")
-                try:
-                    await self._transport.write(part)
-                except LinkClosedError:
-                    raise
-                except Exception as err:  # bleak and the HA bluetooth stack raise their own types
-                    self._handle_closed(notify=True)
-                    raise LinkClosedError(f"proxy write failed: {err}") from err
+            writing = asyncio.ensure_future(self._write_parts(parts))
+            try:
+                await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                while not writing.done():
+                    try:
+                        await asyncio.wait([writing])
+                    except asyncio.CancelledError:
+                        continue  # cancelled again: still finish the PDU first
+                if not writing.cancelled():
+                    writing.exception()  # retrieved: the cancellation is what we report
+                raise
+
+    async def _write_parts(self, parts: list[bytes]) -> None:
+        for part in parts:
+            if not self.is_connected:
+                raise LinkClosedError("proxy link is closed")
+            try:
+                await self._transport.write(part)
+            except LinkClosedError:
+                raise
+            except Exception as err:  # bleak and the HA bluetooth stack raise their own types
+                self._handle_closed(notify=True)
+                raise LinkClosedError(f"proxy write failed: {err}") from err
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
         """Run a send from a notification callback, keeping a reference until it is done."""

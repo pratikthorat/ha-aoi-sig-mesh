@@ -54,7 +54,9 @@ def test_segmented_send_resends_lost_segments(monkeypatch):
     run(scenario())
     assert node.has_app_key
     seqs = [pdu.seq for pdu in sim.from_client]
-    assert len(seqs) == len(set(seqs)) == 3  # segment 1, then segments 0 and 1, all new seqs
+    # Segment 1, then segment 0 with a new seq. That completes the message, and its ack
+    # lands before segment 1 would be sent again.
+    assert seqs == [1, 2]
 
 
 def test_segmented_send_times_out_without_acks(monkeypatch):
@@ -69,6 +71,23 @@ def test_segmented_send_times_out_without_acks(monkeypatch):
 
     run(scenario())
     assert len(sim.from_client) == 2 * (1 + proxy.SEGMENT_RETRANSMITS)
+
+
+def test_request_keeps_a_response_whose_segment_acks_were_lost(monkeypatch):
+    monkeypatch.setattr(proxy, "SEGMENT_ACK_TIMEOUT", 0.02)
+    sim, node = unconfigured_node()
+    sim.drop_acks_to_client = True  # the node gets the message and answers, its acks are lost
+
+    async def scenario():
+        _, _, link = make_link(sim)
+        return await link.request(
+            node.unicast, config_appkey_add(0, 0, APP_KEY), OP_APPKEY_STATUS, dev_key=node.dev_key
+        )
+
+    reply = run(scenario())
+    assert reply.params[0] == STATUS_SUCCESS  # the status proves delivery: no MeshTimeout
+    assert node.has_app_key
+    assert len(sim.from_client) == 2 * (1 + proxy.SEGMENT_RETRANSMITS)  # no ack ever came
 
 
 def test_rejected_segmented_send_raises():
