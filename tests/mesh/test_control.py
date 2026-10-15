@@ -10,7 +10,7 @@ from mesh.models import (
     OP_CTL_STATUS,
     OP_CTL_TEMP_SET,
     OP_CTL_TEMP_STATUS,
-    OP_HEALTH_ATTENTION_SET_UNACK,
+    OP_HEALTH_ATTENTION_SET,
     OP_LIGHTNESS_SET,
     OP_LIGHTNESS_STATUS,
     OP_ONOFF_SET,
@@ -30,6 +30,7 @@ from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, SimMesh, run
 def fast(monkeypatch):
     monkeypatch.setattr(proxy, "REQUEST_TIMEOUT", 0.2)
     monkeypatch.setattr(control, "BLINK_INTERVAL", 0.0)
+    monkeypatch.setattr(control, "ATTENTION_TIMEOUT", 0.1)
 
 
 def node_for(sim_node, **overrides) -> MeshNode:
@@ -338,7 +339,7 @@ def test_refresh_of_a_silent_node_raises_timeout():
     run(scenario(), timeout=10)
 
 
-def test_identify_uses_health_attention_when_present():
+def test_identify_uses_acknowledged_health_attention_when_bound():
     async def scenario():
         sim = SimMesh()
         bulb = sim.add_node("ctl")
@@ -347,8 +348,44 @@ def test_identify_uses_health_attention_when_present():
             currently_on=False
         )
         await asyncio.sleep(0.01)
-        assert sets(bulb) == [(0x00B0, OP_HEALTH_ATTENTION_SET_UNACK)]
+        assert sets(bulb) == [(0x00B0, OP_HEALTH_ATTENTION_SET)]  # answered: no blink
         assert bulb.attention == 5
+
+    run(scenario())
+
+
+def test_identify_blinks_a_light_whose_health_is_not_bound_and_restores_it():
+    """Real nodes drop AppKey messages to an unbound model: no answer means blink instead."""
+
+    async def scenario():
+        sim = SimMesh()
+        bulb = sim.add_node("ctl")
+        bulb.bindings.discard((0x00B0, 0x0002))
+        bulb.on = True
+        link, _ = await open_link(sim)
+        await NodeCommands(link, node_for(bulb), Quirk.NONE, TidCounter()).identify(
+            currently_on=True
+        )
+        await asyncio.sleep(0.01)
+        attention = [s for s in sets(bulb) if s[1] == OP_HEALTH_ATTENTION_SET]
+        assert attention and bulb.attention == 0
+        assert sets(bulb)[len(attention) :] == [(0x00B0, OP_ONOFF_SET_UNACK)] * 6
+        assert bulb.on is True
+
+    run(scenario())
+
+
+def test_identify_on_a_plug_whose_health_is_not_bound_fails_without_toggling():
+    async def scenario():
+        sim = SimMesh()
+        plug = sim.add_node("onoff", health=True)
+        plug.bindings.discard((plug.unicast, 0x0002))
+        link, _ = await open_link(sim)
+        with pytest.raises(MeshTimeout):
+            await NodeCommands(link, node_for(plug), Quirk.NONE, TidCounter()).identify(
+                currently_on=True
+            )
+        assert {opcode for _, opcode in sets(plug)} == {OP_HEALTH_ATTENTION_SET}
 
     run(scenario())
 

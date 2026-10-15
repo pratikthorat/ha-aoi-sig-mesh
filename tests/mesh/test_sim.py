@@ -349,7 +349,20 @@ def test_configured_node_is_bound_to_every_app_key_model():
         (0x00B0, 0x1303),
         (0x00B0, TUYA_VENDOR_MODEL),
         (0x00B1, 0x1306),
+        (0x00B0, 0x0002),  # Health: AppKey-secured like any other server model
     }
+
+
+def test_health_attention_needs_the_health_binding():
+    node = SimMesh().add_node("ctl", configured=True)
+    node.bindings.discard((0x00B0, 0x0002))
+    assert node.handle(0x00B0, health_attention_set(5, ack=True), dev_key=False) == []
+    assert node.attention == 0
+    node.handle(0x00B0, config_model_app_bind(0x00B0, 0, 0x0002), dev_key=True)
+    assert node.handle(0x00B0, health_attention_set(5, ack=True), dev_key=False) == [
+        (0x00B0, bytes.fromhex("800705"))
+    ]
+    assert node.attention == 5
 
 
 def test_bind_to_missing_model_returns_invalid_model():

@@ -23,6 +23,7 @@ from .models import (
     KELVIN_MAX,
     KELVIN_MIN,
     MODEL_GENERIC_ONOFF_SERVER,
+    MODEL_HEALTH_SERVER,
     MODEL_LIGHT_CTL_SERVER,
     MODEL_LIGHT_CTL_TEMP_SERVER,
     MODEL_LIGHT_LIGHTNESS_SERVER,
@@ -31,7 +32,7 @@ from .models import (
     parse_ctl_temperature_range_status,
 )
 from .network import MeshNetwork
-from .node import ROLE_CTL, ROLE_CTL_TEMP, ROLE_LIGHTNESS, ROLE_ONOFF, MeshNode
+from .node import ROLE_CTL, ROLE_CTL_TEMP, ROLE_HEALTH, ROLE_LIGHTNESS, ROLE_ONOFF, MeshNode
 from .proxy import ProxyLink
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class ConfigureResult:
     bound: list[str] = field(default_factory=list)
     published: list[str] = field(default_factory=list)
     kelvin_range: tuple[int, int] | None = None
+    health_bound: bool = False  # Health Server, bound for identify only (never published)
 
 
 async def configure_node(
@@ -70,6 +72,7 @@ async def configure_node(
 
     Composition and AppKey Add are required (ConfigureError). Binds, publication and the
     temperature range are best effort: a node that refuses them still works by polling.
+    Health Server is bound last, for identify's Attention; without it identify blinks.
     Updates ``node`` in place (element count, CID/PID/VID, models, kelvin range).
     """
     dev_key = node.dev_key
@@ -131,6 +134,17 @@ async def configure_node(
         result.kelvin_range = await _read_range(link, node, result.bound)
         if result.kelvin_range is not None:
             node.kelvin_min, node.kelvin_max = result.kelvin_range
+
+    if ROLE_HEALTH in node.models:
+        result.health_bound = await _config_step(
+            link,
+            node,
+            config_model_app_bind(
+                node.models[ROLE_HEALTH], network.app_key_index, MODEL_HEALTH_SERVER
+            ),
+            OP_MODEL_APP_STATUS,
+            "bind health",
+        )
     return result
 
 

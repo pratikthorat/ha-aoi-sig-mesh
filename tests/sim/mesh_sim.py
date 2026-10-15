@@ -111,13 +111,16 @@ UNACK_SETS = (OP_ONOFF_SET_UNACK, OP_LIGHTNESS_SET_UNACK, OP_CTL_SET_UNACK, OP_C
 TID_WINDOW = 6.0  # seconds: the same src+dst+TID inside it is a retransmission
 STATUS_INVALID_ADDRESS = 0x01
 STATUS_INVALID_MODEL = 0x02
-DEV_KEY_MODELS = (0x0000, 0x0002)  # Config Server and Health Server: never bound to the AppKey
+DEV_KEY_MODELS = (0x0000,)  # Config Server: DevKey-secured, never bound to the AppKey
 TUYA_CID_LE = 0xD007  # the Tuya company ID as it appears at the end of a vendor opcode
 OPCODE_MODELS = {
     **dict.fromkeys((OP_ONOFF_GET, OP_ONOFF_SET, OP_ONOFF_SET_UNACK), 0x1000),
     **dict.fromkeys((OP_LIGHTNESS_GET, OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK), 0x1300),
     **dict.fromkeys((OP_CTL_GET, OP_CTL_SET, OP_CTL_SET_UNACK, OP_CTL_TEMP_RANGE_GET), 0x1303),
     **dict.fromkeys((OP_CTL_TEMP_GET, OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), 0x1306),
+    **dict.fromkeys(
+        (OP_HEALTH_ATTENTION_GET, OP_HEALTH_ATTENTION_SET, OP_HEALTH_ATTENTION_SET_UNACK), 0x0002
+    ),
 }
 
 

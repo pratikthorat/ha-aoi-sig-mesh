@@ -9,10 +9,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .errors import MalformedPDUError, MeshError, MeshTimeout
+from .errors import LinkClosedError, MalformedPDUError, MeshError, MeshTimeout, SeqNotSaved
 from .models import (
     OP_CTL_STATUS,
     OP_CTL_TEMP_STATUS,
+    OP_HEALTH_ATTENTION_STATUS,
     OP_LIGHTNESS_STATUS,
     OP_ONOFF_STATUS,
     ctl_get,
@@ -33,6 +34,7 @@ from .proxy import AccessMessage, ProxyLink
 from .quirks import Quirk
 
 ATTENTION_SECONDS = 5
+ATTENTION_TIMEOUT = 1.0  # per attempt, two attempts: identify falls back to a blink quickly
 BLINKS = 3
 BLINK_INTERVAL = 0.4  # read at call time, so tests can shorten it
 TID_WINDOW = 6.0  # seconds: a repeated src+dst+TID inside it is a retransmission
@@ -224,13 +226,28 @@ class NodeCommands:
         return answered
 
     async def identify(self, *, currently_on: bool) -> None:
-        """Health Attention if the node has it; lights blink three times; plugs refuse."""
+        """Health Attention if the node answers it; lights blink three times instead.
+
+        Attention is AppKey-secured, so a node whose Health Server is not bound drops it
+        silently: the acknowledged Set tells us whether it landed. Plugs never blink, since
+        toggling one could switch off whatever is plugged in.
+        """
         if ROLE_HEALTH in self._node.models:
-            await self._link.send(
-                self._node.models[ROLE_HEALTH], health_attention_set(ATTENTION_SECONDS)
-            )
-            return
-        if not self._node.is_light:
+            try:
+                await self._link.request(
+                    self._node.models[ROLE_HEALTH],
+                    health_attention_set(ATTENTION_SECONDS, ack=True),
+                    OP_HEALTH_ATTENTION_STATUS,
+                    timeout=ATTENTION_TIMEOUT,
+                    attempts=2,
+                )
+                return
+            except (LinkClosedError, SeqNotSaved):
+                raise  # no link (or no seq) to blink with either
+            except MeshError:
+                if not self._node.is_light:
+                    raise
+        elif not self._node.is_light:
             raise ValueError("identify needs Health Attention on a plug")
         address = self._address(ROLE_ONOFF)
         on = currently_on

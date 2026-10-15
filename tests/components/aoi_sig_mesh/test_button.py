@@ -11,6 +11,7 @@ from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
 
 from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
+from custom_components.aoi_sig_mesh.mesh import control
 from custom_components.aoi_sig_mesh.mesh.control import BLINKS
 from custom_components.aoi_sig_mesh.mesh.models import OP_ONOFF_SET, OP_ONOFF_SET_UNACK
 from tests.sim.mesh_sim import SimMesh, SimNode
@@ -31,6 +32,34 @@ async def test_identify_sets_health_attention(
     await press(hass, "button.desk_lamp_identify")
 
     await until(lambda: bulb.attention == 5)
+    # Acknowledged, so no blink: the bulb was never toggled.
+    assert not [r for r in bulb.received if r[1] in (OP_ONOFF_SET, OP_ONOFF_SET_UNACK)]
+
+
+async def test_a_light_whose_health_is_not_bound_blinks_instead(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(control, "ATTENTION_TIMEOUT", 0.1)
+    monkeypatch.setattr(control, "BLINK_INTERVAL", 0.0)
+    lamp = sim.add_node("lightness", unicast=0x00C0)
+    lamp.bindings.discard((0x00C0, 0x0002))  # set up before Health was bound
+    lamp.on = True
+    radio.advertise(PLUG_MAC)
+    entry = make_entry(("Hall lamp", node_data(lamp, mac=PLUG_MAC)))
+    coordinator = await setup_entry(hass, entry)
+    try:
+        record = next(iter(coordinator.nodes.values()))
+        await until(lambda: coordinator.connected and record.confirmed.on is True)
+        lamp.received.clear()
+
+        await press(hass, "button.hall_lamp_identify")
+
+        blinks = [r for r in lamp.received if r[1] == OP_ONOFF_SET_UNACK]
+        assert [bool(params[0]) for _, _, params in blinks] == [False, True] * BLINKS
+        assert lamp.on is True
+        assert lamp.attention == 0
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
 
 
 async def test_reconnect_opens_a_new_connection(

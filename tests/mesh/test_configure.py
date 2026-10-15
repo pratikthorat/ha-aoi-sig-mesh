@@ -1,7 +1,7 @@
 import pytest
 
 from mesh import proxy
-from mesh.config import OP_MODEL_APP_STATUS, CompositionData, Element
+from mesh.config import OP_MODEL_APP_BIND, OP_MODEL_APP_STATUS, CompositionData, Element
 from mesh.configure import ConfigureError, configure_node
 from mesh.errors import LinkClosedError, SeqNotSaved
 from mesh.models import OP_CTL_TEMP_RANGE_GET, OP_CTL_TEMP_RANGE_STATUS
@@ -58,8 +58,11 @@ def test_configure_a_fresh_ctl_bulb():
             (0x00B0, 0x1300),
             (0x00B0, 0x1303),
             (0x00B1, 0x1306),
+            (0x00B0, 0x0002),  # Health: identify's Attention is AppKey-secured
         }
+        assert result.health_bound is True
         assert set(bulb.publications.values()) == {0x7F00}
+        assert (0x00B0, 0x0002) not in bulb.publications  # bound for identify, never published
         assert result.kelvin_range == (3000, 6000)
         assert (node.kelvin_min, node.kelvin_max) == (3000, 6000)
 
@@ -198,6 +201,30 @@ def test_a_refused_bind_leaves_the_role_out_of_bound_and_published():
     assert result.bound == ["onoff", "ctl", "ctl_temp"]
     assert result.published == result.bound
     assert (bulb.unicast, 0x1300) not in bulb.publications
+
+
+def test_a_refused_health_bind_does_not_fail_the_setup():
+    """Health is bound last and only for identify, which falls back to a blink without it."""
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.kelvin_min, bulb.kelvin_max = 3000, 6000
+    bulb.refuse_bind = {0x0002}
+    node, result = configure(sim, bulb)
+    assert result.bound == ["onoff", "lightness", "ctl", "ctl_temp"]
+    assert result.published == result.bound
+    assert result.kelvin_range == (3000, 6000)
+    assert result.health_bound is False
+    assert (bulb.unicast, 0x0002) not in bulb.bindings
+
+
+def test_a_node_without_health_skips_the_health_bind():
+    sim = SimMesh()
+    plug = sim.add_node("onoff", configured=False)
+    node, result = configure(sim, plug)
+    assert result.bound == ["onoff"]
+    assert result.health_bound is False
+    binds = [r for r in plug.received if r[1] == OP_MODEL_APP_BIND]
+    assert len(binds) == 1
 
 
 def test_a_refused_publication_stays_bound_but_not_published():
