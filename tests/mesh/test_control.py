@@ -3,7 +3,14 @@ import asyncio
 import pytest
 
 from mesh import control, proxy
-from mesh.control import NodeCommands, NodeState, StatusUpdate, TidCounter, apply_status
+from mesh.control import (
+    NodeCommands,
+    NodeState,
+    StatusUpdate,
+    TidCounter,
+    apply_status,
+    status_is_for,
+)
 from mesh.errors import MeshError, MeshTimeout
 from mesh.models import (
     OP_CTL_SET,
@@ -126,6 +133,24 @@ def test_apply_status_reads_the_long_forms_and_prefers_the_target(
     state = NodeState()
     assert apply_status(state, msg(opcode, params)) == StatusUpdate(remaining_ms)
     assert state == expected
+
+
+def test_a_status_counts_only_from_the_element_hosting_its_model():
+    sim = SimMesh()
+    bulb = node_for(sim.add_node("ctl"))  # OnOff, Lightness, CTL on 0x00B0; CTL Temp on 0x00B1
+
+    def status(src, opcode, params="01"):
+        return AccessMessage(src, CLIENT, opcode, bytes.fromhex(params), dev_key=False)
+
+    assert status_is_for(bulb, status(0x00B0, OP_ONOFF_STATUS))
+    assert not status_is_for(bulb, status(0x00B1, OP_ONOFF_STATUS))
+    assert status_is_for(bulb, status(0x00B1, OP_CTL_TEMP_STATUS))
+    assert not status_is_for(bulb, status(0x00B0, OP_CTL_TEMP_STATUS))
+    assert not status_is_for(bulb, status(0x00B1, OP_LIGHTNESS_STATUS))
+    assert status_is_for(bulb, status(0x00B1, 0x8007))  # not a state status: not checked
+    # An imported node knows only its unicast: commands and their answers use it.
+    bare = MeshNode(unicast=0x00B0, element_count=1, dev_key=bytes(16))
+    assert status_is_for(bare, status(0x00B0, OP_ONOFF_STATUS))
 
 
 def test_tid_counter_counts_up_per_destination_and_wraps():

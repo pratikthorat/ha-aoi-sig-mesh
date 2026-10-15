@@ -66,6 +66,25 @@ def _apply_lightness(state: NodeState, lightness: int) -> None:
         state.lightness = lightness
 
 
+STATUS_ROLES = {
+    OP_ONOFF_STATUS: ROLE_ONOFF,
+    OP_LIGHTNESS_STATUS: ROLE_LIGHTNESS,
+    OP_CTL_STATUS: ROLE_CTL,
+    OP_CTL_TEMP_STATUS: ROLE_CTL_TEMP,
+}
+
+
+def status_is_for(node: MeshNode, message: AccessMessage) -> bool:
+    """True when the status comes from the element that hosts its model on ``node``.
+
+    A status names no model, only its source element: an OnOff Status from a second element
+    is about that element's own OnOff server, not the node's light. Commands for a role go
+    to the same address (``models.get(role, unicast)``), so its answers always pass.
+    """
+    role = STATUS_ROLES.get(message.opcode)
+    return role is None or node.models.get(role, node.unicast) == message.src
+
+
 def apply_status(state: NodeState, message: AccessMessage) -> StatusUpdate | None:
     """Fold one status message into ``state``. Returns None for anything that is not a status.
 

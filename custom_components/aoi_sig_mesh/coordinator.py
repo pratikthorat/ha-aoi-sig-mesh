@@ -43,7 +43,7 @@ from .const import (
 )
 from .mesh.configure import ConfigureError, configure_node
 from .mesh.connection import ConnectionManager, MeshRadio, ProxyCandidate
-from .mesh.control import NodeCommands, NodeState, TidCounter, apply_status
+from .mesh.control import NodeCommands, NodeState, TidCounter, apply_status, status_is_for
 from .mesh.errors import LinkClosedError, MeshError, MeshTimeout, SeqNotSaved
 from .mesh.network import BeaconOutcome, MeshNetwork
 from .mesh.node import ROLE_HEALTH, ROLE_LIGHTNESS, MeshNode
@@ -574,7 +574,10 @@ class MeshCoordinator:
         record.last_seen = dt_util.utcnow()
         record.failures = 0
         record.available = True
-        update = apply_status(record.state, message)
+        # Seen (above) whichever element spoke; the state only from the one owning the model.
+        update = (
+            apply_status(record.state, message) if status_is_for(record.node, message) else None
+        )
         if update is not None:
             apply_status(record.confirmed, message)
             record.generation += 1  # a failed command no longer reverts over this

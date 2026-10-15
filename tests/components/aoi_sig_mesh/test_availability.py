@@ -16,7 +16,12 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 from custom_components.aoi_sig_mesh import coordinator as coordinator_module
 from custom_components.aoi_sig_mesh.const import DOMAIN
 from custom_components.aoi_sig_mesh.coordinator import POLL_INTERVAL, MeshCoordinator
-from custom_components.aoi_sig_mesh.mesh.models import OP_ONOFF_GET, OP_ONOFF_STATUS, encode_opcode
+from custom_components.aoi_sig_mesh.mesh.models import (
+    OP_CTL_TEMP_STATUS,
+    OP_ONOFF_GET,
+    OP_ONOFF_STATUS,
+    encode_opcode,
+)
 from tests.sim.mesh_sim import CLIENT, SimMesh, SimNode
 from tests.sim.sim_radio import SimRadio
 
@@ -114,6 +119,35 @@ async def test_a_status_with_remaining_time_reads_the_final_state_afterwards(
 
     await until(lambda: len(bulb.received) > received)
     assert bulb.received[received][1] == OP_ONOFF_GET
+
+
+async def test_a_status_from_another_element_marks_the_node_seen_but_not_its_state(
+    hass: HomeAssistant, sim: SimMesh, bulb: SimNode, bulb_entry: Any
+) -> None:
+    """The bulb's OnOff lives on element 0: an OnOff Status from element 1 is not about it."""
+    coordinator: MeshCoordinator = bulb_entry.runtime_data
+    record = next(iter(coordinator.nodes.values()))
+    assert record.node.models["onoff"] == bulb.unicast
+    assert record.state.on is False and record.confirmed.on is False
+    record.last_seen, record.available = None, False
+
+    sim.send_access(bulb.unicast + 1, CLIENT, encode_opcode(OP_ONOFF_STATUS) + bytes([1]))
+
+    await until(lambda: record.last_seen is not None)
+    assert record.available
+    assert record.state.on is False and record.confirmed.on is False
+    assert hass.states.get("light.desk_lamp").state == "off"
+
+    # CTL Temperature does live on element 1: its status applies.
+    temp = encode_opcode(OP_CTL_TEMP_STATUS) + (3500).to_bytes(2, "little") + bytes(2)
+    sim.send_access(bulb.unicast + 1, CLIENT, temp)
+    await until(lambda: record.state.kelvin == 3500)
+    # ... and from element 0 it does not.
+    record.last_seen = None
+    temp = encode_opcode(OP_CTL_TEMP_STATUS) + (5000).to_bytes(2, "little") + bytes(2)
+    sim.send_access(bulb.unicast, CLIENT, temp)
+    await until(lambda: record.last_seen is not None)
+    assert record.state.kelvin == 3500
 
 
 async def test_a_poll_is_skipped_while_the_last_round_still_runs(
