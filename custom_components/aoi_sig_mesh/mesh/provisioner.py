@@ -15,7 +15,7 @@ from typing import Protocol
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from .crypto import aes_cmac, ccm_decrypt, ccm_encrypt, k1, s1
-from .errors import MalformedPDUError, MeshError, ProvisioningError
+from .errors import MalformedPDUError, MeshCryptoError, MeshError, ProvisioningError
 from .pdu import PDU_PROVISIONING, ProxyReassembler, proxy_pdus
 from .proxy import GattTransport
 
@@ -27,6 +27,7 @@ PUBLIC_KEY_TIMEOUT = 15.0
 CONFIRMATION_TIMEOUT = 10.0
 RANDOM_TIMEOUT = 10.0
 COMPLETE_TIMEOUT = 15.0
+INBOX_SIZE = 16  # PDUs queued from the device; a well-behaved one sends one at a time
 START_DELAY = 0.5  # some devices drop a Public Key sent right after Start
 ATTENTION_SECONDS = 5  # the device blinks or beeps while it is being provisioned
 CLOSE_TIMEOUT = 5.0
@@ -36,6 +37,7 @@ PROV_INVITE = 0x00
 PROV_CAPABILITIES = 0x01
 PROV_START = 0x02
 PROV_PUBLIC_KEY = 0x03
+PROV_INPUT_COMPLETE = 0x04  # only sent for Input OOB, which we never use
 PROV_CONFIRMATION = 0x05
 PROV_RANDOM = 0x06
 PROV_DATA = 0x07
@@ -75,6 +77,7 @@ PDU_LENGTHS = {
     PROV_CAPABILITIES: CAPABILITIES.size,
     PROV_START: 5,
     PROV_PUBLIC_KEY: 64,
+    PROV_INPUT_COMPLETE: 0,
     PROV_CONFIRMATION: 16,
     PROV_RANDOM: 16,
     PROV_DATA: PROVISIONING_DATA.size + 8,
@@ -159,8 +162,16 @@ def parse_prov_pdu(pdu: bytes) -> tuple[int, bytes]:
 # keys
 
 
+P256_PRIME = 2**256 - 2**224 + 2**192 + 2**96 - 1
+P256_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+
 def private_key_from_bytes(raw: bytes) -> ec.EllipticCurvePrivateKey:
-    return ec.derive_private_key(int.from_bytes(raw, "big"), ec.SECP256R1())
+    """A P-256 private key from its big-endian bytes; it must be in 1..n-1."""
+    value = int.from_bytes(raw, "big")
+    if not 1 <= value < P256_ORDER:
+        raise MeshCryptoError("a P-256 private key must be in 1..n-1")
+    return ec.derive_private_key(value, ec.SECP256R1())
 
 
 def generate_private_key() -> ec.EllipticCurvePrivateKey:
@@ -177,10 +188,11 @@ def ecdh_secret(private_key: ec.EllipticCurvePrivateKey, peer: bytes) -> bytes:
     """The P-256 ECDH shared secret; MalformedPDUError if ``peer`` is not a point on the curve."""
     if len(peer) != 64:
         raise MalformedPDUError("a public key is 64 bytes")
+    x, y = int.from_bytes(peer[:32], "big"), int.from_bytes(peer[32:], "big")
+    if x >= P256_PRIME or y >= P256_PRIME:
+        raise MalformedPDUError("the public key is not a valid P-256 point")
     try:
-        public = ec.EllipticCurvePublicNumbers(
-            int.from_bytes(peer[:32], "big"), int.from_bytes(peer[32:], "big"), ec.SECP256R1()
-        ).public_key()
+        public = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
         return private_key.exchange(ec.ECDH(), public)
     except ValueError as err:
         raise MalformedPDUError("the public key is not a valid P-256 point") from err
@@ -228,7 +240,15 @@ def encrypt_provisioning_data(key: bytes, nonce: bytes, data: ProvisioningData) 
 
 
 def decrypt_provisioning_data(key: bytes, nonce: bytes, encrypted: bytes) -> ProvisioningData:
-    """Raises MeshAuthError when the MIC fails, MalformedPDUError for a bad length."""
+    """The Provisioning Data inside ``encrypted`` (25 bytes plus an 8-byte MIC = 33 bytes).
+
+    Raises MalformedPDUError for a wrong length, MeshAuthError when the MIC fails.
+    """
+    if len(encrypted) != PROVISIONING_DATA.size + 8:
+        raise MalformedPDUError(
+            f"encrypted Provisioning Data must be {PROVISIONING_DATA.size + 8} bytes, "
+            f"got {len(encrypted)}"
+        )
     return parse_provisioning_data(ccm_decrypt(key, nonce, encrypted, 8))
 
 
@@ -278,7 +298,7 @@ class Provisioner:
         self._random = random
         self._attention = attention
         self._reassembler = ProxyReassembler()
-        self._inbox: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._inbox: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=INBOX_SIZE)
 
     async def provision(
         self,
@@ -297,7 +317,7 @@ class Provisioner:
         """
         transport = self._transport
         transport.set_notify_callback(self._on_notify)
-        transport.set_disconnect_callback(lambda: self._inbox.put_nowait(None))
+        transport.set_disconnect_callback(self._on_disconnect)
         private_key = self._private_key or generate_private_key()
         public_p = public_key_bytes(private_key)
 
@@ -318,6 +338,8 @@ class Provisioner:
         await self._send("start", PROV_START, START_NO_OOB)
         await asyncio.sleep(START_DELAY)
         await self._send("public_key", PROV_PUBLIC_KEY, public_p)
+        # A device that refuses Start answers Provisioning Failed here, so it is reported at
+        # "public_key": that is the step we are waiting on when the refusal arrives.
         public_d = await self._expect("public_key", PROV_PUBLIC_KEY, PUBLIC_KEY_TIMEOUT)
         if hmac.compare_digest(public_d, public_p):
             raise ProvisioningError("public_key", "the device echoed our public key")
@@ -358,7 +380,20 @@ class Provisioner:
     def _on_notify(self, data: bytes) -> None:
         message = self._reassembler.feed(bytes(data))
         if message is not None and message[0] == PDU_PROVISIONING:
-            self._inbox.put_nowait(message[1])
+            try:
+                self._inbox.put_nowait(message[1])
+            except asyncio.QueueFull:
+                _LOGGER.debug("Provisioning: inbox full, dropping a PDU")
+
+    def _on_disconnect(self) -> None:
+        """Wake the waiting step; the sentinel is never dropped, a queued PDU makes room."""
+        while True:
+            try:
+                self._inbox.put_nowait(None)
+                return
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    self._inbox.get_nowait()
 
     async def _send(self, step: str, pdu_type: int, params: bytes) -> None:
         if not self._transport.is_connected:
@@ -376,7 +411,7 @@ class Provisioner:
             async with asyncio.timeout(timeout):
                 pdu = await self._inbox.get()
         except TimeoutError as err:
-            raise ProvisioningError(step, f"no answer in {timeout:.0f} s") from err
+            raise ProvisioningError(step, f"no answer in {timeout:g} s") from err
         if pdu is None:
             raise ProvisioningError(step, "the link dropped")
         try:

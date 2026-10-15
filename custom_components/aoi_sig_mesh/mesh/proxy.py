@@ -622,6 +622,8 @@ def node_identity_hash(identity_key: bytes, random: bytes, address: int) -> byte
     """The hash in a Node Identity advert: e(IdentityKey, 6 zero bytes || Random || address)."""
     if len(random) != 8:
         raise ValueError("the Node Identity random is 8 bytes")
+    if not 0x0001 <= address <= 0x7FFF:
+        raise ValueError(f"0x{address:04X} is not a unicast address")
     return aes_ecb(identity_key, bytes(6) + random + address.to_bytes(2, "big"))[8:]
 
 

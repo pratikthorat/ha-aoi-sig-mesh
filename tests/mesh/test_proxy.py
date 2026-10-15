@@ -421,6 +421,13 @@ def test_node_identity_hash_rejects_a_bad_random():
         node_identity_hash(bytes(16), bytes(7), 0x0001)
 
 
+@pytest.mark.parametrize("address", [0x0000, 0x8000, 0xC000, 0xFFFF, 0x10000])
+def test_node_identity_hash_rejects_a_non_unicast_address(address):
+    with pytest.raises(ValueError, match="not a unicast address"):
+        node_identity_hash(bytes(16), bytes(8), address)
+    assert len(node_identity_hash(bytes(16), bytes(8), 0x7FFF)) == 8
+
+
 def test_too_far_beacon_warns_once_per_iv_index(caplog):
     sim = SimMesh()
     outcomes = []

@@ -6,15 +6,25 @@ import pickle
 import pytest
 
 from mesh import provisioner
-from mesh.errors import MalformedPDUError, MeshAuthError, MeshError, ProvisioningError
-from mesh.pdu import ProxyReassembler
+from mesh.errors import (
+    MalformedPDUError,
+    MeshAuthError,
+    MeshCryptoError,
+    MeshError,
+    ProvisioningError,
+)
+from mesh.pdu import PDU_PROVISIONING, ProxyReassembler, proxy_pdus
 from mesh.provisioner import (
     FAILED_CONFIRMATION,
     FAILED_OUT_OF_RESOURCES,
+    P256_ORDER,
+    P256_PRIME,
     PROV_CAPABILITIES,
     PROV_COMPLETE,
     PROV_CONFIRMATION,
     PROV_DATA,
+    PROV_FAILED,
+    PROV_INPUT_COMPLETE,
     PROV_INVITE,
     PROV_PUBLIC_KEY,
     PROV_RANDOM,
@@ -33,10 +43,13 @@ from mesh.provisioner import (
     device_key,
     ecdh_secret,
     encrypt_provisioning_data,
+    generate_private_key,
     parse_capabilities,
     parse_prov_pdu,
+    parse_provisioning_data,
     private_key_from_bytes,
     prov_pdu,
+    provision_device,
     provisioning_salt,
     public_key_bytes,
     session_key,
@@ -393,3 +406,174 @@ def test_refused_errors_pickle():
     error = pickle.loads(pickle.dumps(ProvisioningRefused("random", FAILED_CONFIRMATION)))
     assert (error.step, error.code) == ("random", FAILED_CONFIRMATION)
     assert "confirmation failed" in str(error)
+
+
+# polish: input checks and pinned edges
+
+
+def test_a_public_key_coordinate_at_or_above_p_is_malformed():
+    key = private_key_from_bytes(PRIVATE_P)
+    x, y = PUBLIC_D[:32], PUBLIC_D[32:]
+    too_big = (int.from_bytes(x, "big") + P256_PRIME).to_bytes(33, "big")[-32:]
+    for bad in (
+        P256_PRIME.to_bytes(32, "big") + y,
+        x + P256_PRIME.to_bytes(32, "big"),
+        bytes([0xFF]) * 64,
+        too_big + y,
+    ):
+        with pytest.raises(MalformedPDUError, match="not a valid P-256 point"):
+            ecdh_secret(key, bad)
+
+
+def test_decrypting_provisioning_data_checks_its_length_first():
+    for bad in (b"", ENCRYPTED[:-1], ENCRYPTED + b"\x00"):
+        with pytest.raises(MalformedPDUError, match="must be 33 bytes"):
+            decrypt_provisioning_data(SESSION_KEY, SESSION_NONCE, bad)
+
+
+def test_provisioning_input_complete_has_its_name():
+    assert PROV_INPUT_COMPLETE == 0x04
+    assert parse_prov_pdu(prov_pdu(PROV_INPUT_COMPLETE)) == (PROV_INPUT_COMPLETE, b"")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [bytes(32), P256_ORDER.to_bytes(32, "big"), bytes([0xFF]) * 32],
+    ids=["zero", "n", "max"],
+)
+def test_a_private_key_outside_1_to_n_minus_1_is_rejected(raw):
+    with pytest.raises(MeshCryptoError):
+        private_key_from_bytes(raw)
+    assert private_key_from_bytes((P256_ORDER - 1).to_bytes(32, "big")) is not None
+
+
+def test_provisioning_data_must_be_exactly_its_size():
+    good = DATA.encode()
+    assert parse_provisioning_data(good) == DATA
+    for bad in (good[:-1], good + b"\x00", b""):
+        with pytest.raises(MalformedPDUError):
+            parse_provisioning_data(bad)
+
+
+def test_a_generated_private_key_is_in_range_and_differs_each_time():
+    first, second = generate_private_key(), generate_private_key()
+    for key in (first, second):
+        assert 1 <= key.private_numbers().private_value < P256_ORDER
+    assert first.private_numbers().private_value != second.private_numbers().private_value
+
+
+def test_a_full_inbox_drops_the_newest_pdu_but_never_the_close_sentinel(caplog):
+    async def scenario():
+        transport = SimUnprovisioned("AA:00:00:00:00:27").connect()
+        prov = Provisioner(transport)
+        prov._transport.set_notify_callback(prov._on_notify)
+        reassembler = ProxyReassembler()
+        assert reassembler is not None
+        for i in range(provisioner.INBOX_SIZE + 5):
+            payload = prov_pdu(PROV_RANDOM, bytes([i]) * 16)
+            for part in proxy_pdus(PDU_PROVISIONING, payload, 20):
+                prov._on_notify(part)
+        assert prov._inbox.qsize() == provisioner.INBOX_SIZE
+        assert prov._inbox.get_nowait()[1] == 0  # the oldest is kept
+        prov._inbox.put_nowait(b"x")
+        prov._on_disconnect()  # full queue: makes room, never raises or blocks
+        items = []
+        while not prov._inbox.empty():
+            items.append(prov._inbox.get_nowait())
+        assert items[-1] is None
+        assert len(items) == provisioner.INBOX_SIZE
+
+    with caplog.at_level("DEBUG"):
+        run(scenario())
+    assert "inbox full" in caplog.text
+
+
+def test_step_timeouts_are_read_when_the_call_is_made(monkeypatch):
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", stall_at="capabilities")
+        monkeypatch.setattr(provisioner, "CAPABILITIES_TIMEOUT", 0.05)
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(ProvisioningError) as caught:
+            await provision(device)
+        assert asyncio.get_running_loop().time() - started < 1
+        assert caught.value.step == "capabilities"
+
+    run(scenario())
+
+
+def test_timeout_messages_drop_the_trailing_zero(monkeypatch):
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", stall_at="capabilities")
+        monkeypatch.setattr(provisioner, "CAPABILITIES_TIMEOUT", 0.05)
+        with pytest.raises(ProvisioningError) as caught:
+            await provision(device)
+        assert caught.value.message == "no answer in 0.05 s"
+
+    run(scenario())
+
+
+class FailsAtRandom(SimUnprovisioned):
+    def _on_random(self, params):
+        self._send(PROV_FAILED, bytes([FAILED_CONFIRMATION]))
+
+
+def test_a_failed_pdu_at_the_random_step_names_it():
+    async def scenario():
+        with pytest.raises(ProvisioningRefused) as caught:
+            await provision(FailsAtRandom("AA:00:00:00:00:27"))
+        assert (caught.value.step, caught.value.code) == ("random", FAILED_CONFIRMATION)
+
+    run(scenario())
+
+
+def test_a_failed_write_at_the_random_step_names_it():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27")
+        transport = device.connect()
+        real_write = transport.write
+
+        async def write(data):
+            if PROV_CONFIRMATION in device.received:  # the Random PDU is the next write
+                raise OSError("radio gone")
+            await real_write(data)
+
+        transport.write = write
+        with pytest.raises(ProvisioningError) as caught:
+            await Provisioner(transport).provision(
+                net_key=SIM_NET_KEY, net_key_index=0, iv_index=0, flags=0, assign=assign_0x10
+            )
+        assert caught.value.step == "random"
+        assert "write failed" in caught.value.message
+        assert PROV_DATA not in device.received
+
+    run(scenario())
+
+
+def test_cancelling_provision_device_closes_the_transport(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(provisioner, "CAPABILITIES_TIMEOUT", 30.0)
+        device = SimUnprovisioned("AA:00:00:00:00:27", stall_at="capabilities")
+        transport = device.connect()
+
+        class Radio:
+            async def connect_provisioning(self, address):
+                return transport
+
+        task = asyncio.ensure_future(
+            provision_device(
+                Radio(),
+                "AA:00:00:00:00:27",
+                net_key=SIM_NET_KEY,
+                net_key_index=0,
+                iv_index=0,
+                assign=assign_0x10,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert transport.is_connected
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not transport.is_connected
+
+    run(scenario())
