@@ -47,7 +47,7 @@ If your devices are already in a network made with the nRF Mesh app, bring that 
 
 In nRF Mesh, open Settings > **Export**, export everything (including the device keys) as JSON, and paste the file's contents into **Import from nRF Mesh**.
 
-The export holds your network keys, so delete it once the import is done. Home Assistant gets its own address in the network, so it never clashes with the phone.
+The export holds your network keys, so delete it once the import is done. Home Assistant gets its own address in the network, so it never clashes with the phone. If the network is in the middle of an IV Update when you export it, the export loses that state. Home Assistant picks it up again from the network's beacon the first time it connects.
 
 ## Move from Tuya BLE Mesh
 
