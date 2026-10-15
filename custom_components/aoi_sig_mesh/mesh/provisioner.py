@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
+import hmac
+import logging
+import os
 import struct
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from .crypto import aes_cmac, ccm_decrypt, ccm_encrypt, k1, s1
-from .errors import MalformedPDUError
+from .errors import MalformedPDUError, MeshError, ProvisioningError
+from .pdu import PDU_PROVISIONING, ProxyReassembler, proxy_pdus
+from .proxy import GattTransport
+
+_LOGGER = logging.getLogger(__name__)
+
+# Read at call time, so tests can shorten them with monkeypatch.
+CAPABILITIES_TIMEOUT = 10.0
+PUBLIC_KEY_TIMEOUT = 15.0
+CONFIRMATION_TIMEOUT = 10.0
+RANDOM_TIMEOUT = 10.0
+COMPLETE_TIMEOUT = 15.0
+START_DELAY = 0.5  # some devices drop a Public Key sent right after Start
+ATTENTION_SECONDS = 5  # the device blinks or beeps while it is being provisioned
 
 # Provisioning PDU types (Mesh Profile 5.4.1)
 PROV_INVITE = 0x00
@@ -209,3 +227,158 @@ def encrypt_provisioning_data(key: bytes, nonce: bytes, data: ProvisioningData) 
 def decrypt_provisioning_data(key: bytes, nonce: bytes, encrypted: bytes) -> ProvisioningData:
     """Raises MeshAuthError when the MIC fails, MalformedPDUError for a bad length."""
     return parse_provisioning_data(ccm_decrypt(key, nonce, encrypted, 8))
+
+
+# the provisioner
+
+
+class ProvisioningRefused(ProvisioningError):
+    """The device answered with Provisioning Failed: it is not provisioned."""
+
+    def __init__(self, step: str, code: int) -> None:
+        MeshError.__init__(self, step, code)  # both in args, so the error pickles
+        self.step = step
+        self.code = code
+        self.message = f"the device refused: {FAILED_REASONS.get(code, f'error 0x{code:02X}')}"
+
+
+@dataclass(frozen=True)
+class ProvisioningResult:
+    unicast: int
+    element_count: int
+    dev_key: bytes = field(repr=False)
+    capabilities: Capabilities
+
+
+class Provisioner:
+    """Runs the provisioner side of PB-GATT over one Mesh Provisioning Service connection.
+
+    Every wait has its own timeout and every failure raises ``ProvisioningError`` naming the
+    step. The caller owns the transport (and closes it). Nothing here touches a network's
+    sequence numbers: provisioning PDUs are not network PDUs.
+    """
+
+    def __init__(
+        self,
+        transport: GattTransport,
+        *,
+        private_key: ec.EllipticCurvePrivateKey | None = None,
+        random: Callable[[int], bytes] = os.urandom,
+        attention: int = ATTENTION_SECONDS,
+    ) -> None:
+        self._transport = transport
+        self._private_key = private_key
+        self._random = random
+        self._attention = attention
+        self._reassembler = ProxyReassembler()
+        self._inbox: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def provision(
+        self,
+        *,
+        net_key: bytes,
+        net_key_index: int,
+        iv_index: int,
+        flags: int,
+        assign: Callable[[Capabilities], Awaitable[int]],
+    ) -> ProvisioningResult:
+        """Provision the device and return its address and DevKey.
+
+        ``assign`` gets the device's capabilities (its element count) and returns the unicast
+        address to give it. It runs before anything is sent that commits the device, so it can
+        reserve the address; whatever it raises propagates unchanged.
+        """
+        transport = self._transport
+        transport.set_notify_callback(self._on_notify)
+        transport.set_disconnect_callback(lambda: self._inbox.put_nowait(None))
+        private_key = self._private_key or generate_private_key()
+        public_p = public_key_bytes(private_key)
+
+        invite = bytes([self._attention])
+        await self._send("invite", PROV_INVITE, invite)
+        caps_raw = await self._expect("capabilities", PROV_CAPABILITIES, CAPABILITIES_TIMEOUT)
+        caps = parse_capabilities(caps_raw)
+        if caps.elements < 1:
+            raise ProvisioningError("capabilities", "the device reports no elements")
+        if not caps.algorithms & ALGORITHM_FIPS_P256:
+            raise ProvisioningError("capabilities", "the device does not support P-256")
+        if caps.static_oob_type & STATIC_OOB_ONLY:
+            raise ProvisioningError(
+                "capabilities", "the device only accepts OOB authentication, which is unsupported"
+            )
+        unicast = await assign(caps)
+
+        await self._send("start", PROV_START, START_NO_OOB)
+        await asyncio.sleep(START_DELAY)
+        await self._send("public_key", PROV_PUBLIC_KEY, public_p)
+        public_d = await self._expect("public_key", PROV_PUBLIC_KEY, PUBLIC_KEY_TIMEOUT)
+        if hmac.compare_digest(public_d, public_p):
+            raise ProvisioningError("public_key", "the device echoed our public key")
+        try:
+            secret = ecdh_secret(private_key, public_d)
+        except MalformedPDUError as err:
+            raise ProvisioningError("public_key", str(err)) from err
+
+        salt = confirmation_salt(
+            confirmation_inputs(invite, caps_raw, START_NO_OOB, public_p, public_d)
+        )
+        key = confirmation_key(secret, salt)
+        random_p = self._random(16)
+        confirmation_p = confirmation(key, random_p)
+        await self._send("confirmation", PROV_CONFIRMATION, confirmation_p)
+        confirmation_d = await self._expect("confirmation", PROV_CONFIRMATION, CONFIRMATION_TIMEOUT)
+        if hmac.compare_digest(confirmation_d, confirmation_p):
+            raise ProvisioningError("confirmation", "the device reflected our confirmation")
+        await self._send("random", PROV_RANDOM, random_p)
+        random_d = await self._expect("random", PROV_RANDOM, RANDOM_TIMEOUT)
+        if not hmac.compare_digest(confirmation(key, random_d), confirmation_d):
+            raise ProvisioningError("random", "the device's confirmation does not match")
+
+        prov_salt = provisioning_salt(salt, random_p, random_d)
+        data = ProvisioningData(net_key, net_key_index, flags, iv_index, unicast)
+        encrypted = encrypt_provisioning_data(
+            session_key(secret, prov_salt), session_nonce(secret, prov_salt), data
+        )
+        await self._send("data", PROV_DATA, encrypted)
+        await self._expect("complete", PROV_COMPLETE, COMPLETE_TIMEOUT)
+        return ProvisioningResult(
+            unicast=unicast,
+            element_count=caps.elements,
+            dev_key=device_key(secret, prov_salt),
+            capabilities=caps,
+        )
+
+    def _on_notify(self, data: bytes) -> None:
+        message = self._reassembler.feed(bytes(data))
+        if message is not None and message[0] == PDU_PROVISIONING:
+            self._inbox.put_nowait(message[1])
+
+    async def _send(self, step: str, pdu_type: int, params: bytes) -> None:
+        if not self._transport.is_connected:
+            raise ProvisioningError(step, "the link dropped")
+        payload = prov_pdu(pdu_type, params)
+        try:
+            for part in proxy_pdus(PDU_PROVISIONING, payload, self._transport.max_write):
+                await self._transport.write(part)
+        except Exception as err:  # bleak and the HA bluetooth stack raise their own types
+            raise ProvisioningError(step, f"write failed: {err}") from err
+
+    async def _expect(self, step: str, pdu_type: int, timeout: float) -> bytes:
+        """The next provisioning PDU, which must be ``pdu_type``; its parameters."""
+        try:
+            async with asyncio.timeout(timeout):
+                pdu = await self._inbox.get()
+        except TimeoutError as err:
+            raise ProvisioningError(step, f"no answer in {timeout:.0f} s") from err
+        if pdu is None:
+            raise ProvisioningError(step, "the link dropped")
+        try:
+            got, params = parse_prov_pdu(pdu)
+        except MalformedPDUError as err:
+            raise ProvisioningError(step, str(err)) from err
+        if got == PROV_FAILED:
+            raise ProvisioningRefused(step, params[0])
+        if got != pdu_type:
+            raise ProvisioningError(step, f"unexpected PDU 0x{got:02X}")
+        _LOGGER.debug("Provisioning: %s done", step)
+        return params

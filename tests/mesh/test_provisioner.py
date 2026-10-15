@@ -1,15 +1,29 @@
 """Provisioning PDUs and crypto against the Mesh Profile section 8.7 sample data."""
 
+import asyncio
+import pickle
+
 import pytest
 
-from mesh.errors import MalformedPDUError, MeshAuthError
+from mesh import provisioner
+from mesh.errors import MalformedPDUError, MeshAuthError, MeshError, ProvisioningError
+from mesh.pdu import ProxyReassembler
 from mesh.provisioner import (
+    FAILED_CONFIRMATION,
+    FAILED_OUT_OF_RESOURCES,
     PROV_CAPABILITIES,
     PROV_COMPLETE,
+    PROV_CONFIRMATION,
+    PROV_DATA,
+    PROV_INVITE,
     PROV_PUBLIC_KEY,
+    PROV_RANDOM,
+    PROV_START,
     START_NO_OOB,
     Capabilities,
+    Provisioner,
     ProvisioningData,
+    ProvisioningRefused,
     confirmation,
     confirmation_inputs,
     confirmation_key,
@@ -27,6 +41,9 @@ from mesh.provisioner import (
     session_key,
     session_nonce,
 )
+from tests.sim.mesh_sim import NET_KEY as SIM_NET_KEY
+from tests.sim.mesh_sim import run
+from tests.sim.prov_sim import STALL_STEPS, SimUnprovisioned
 
 h = bytes.fromhex
 
@@ -122,3 +139,256 @@ def test_pdu_parsing_checks_type_and_length():
     for bad in (b"", b"\x0a", b"\x41" + CAPS, prov_pdu(PROV_PUBLIC_KEY, PUBLIC_P[:10])):
         with pytest.raises(MalformedPDUError):
             parse_prov_pdu(bad)
+
+
+# the provisioner against the simulated device
+
+
+def fast_timeouts(monkeypatch):
+    for name in (
+        "CAPABILITIES_TIMEOUT",
+        "PUBLIC_KEY_TIMEOUT",
+        "CONFIRMATION_TIMEOUT",
+        "RANDOM_TIMEOUT",
+        "COMPLETE_TIMEOUT",
+    ):
+        monkeypatch.setattr(provisioner, name, 0.1)
+    monkeypatch.setattr(provisioner, "START_DELAY", 0)
+
+
+@pytest.fixture(autouse=True)
+def fast(monkeypatch):
+    fast_timeouts(monkeypatch)
+
+
+async def provision(device, *, unicast=0x0010, assigned=None, **kwargs):
+    transport = device.connect()
+
+    async def assign(caps):
+        if assigned is not None:
+            assigned.append(caps)
+        return unicast
+
+    provisioner_ = Provisioner(transport, **kwargs)
+    return await provisioner_.provision(
+        net_key=SIM_NET_KEY, net_key_index=0, iv_index=0, flags=0, assign=assign
+    )
+
+
+def written_pdus(transport):
+    """The provisioning PDUs the provisioner wrote, reassembled."""
+    rx, pdus = ProxyReassembler(), []
+    for part in transport.writes:
+        if (message := rx.feed(part)) is not None:
+            pdus.append(message[1])
+    return pdus
+
+
+def test_provisioning_reproduces_the_sample_data_on_the_air():
+    async def scenario():
+        device = SimUnprovisioned(
+            "AA:00:00:00:00:27", private_key=private_key_from_bytes(PRIVATE_D), random=RANDOM_D
+        )
+        transport = device.connect()
+
+        async def assign(caps):
+            assert caps.encode() == CAPS
+            return 0x0B0C
+
+        result = await Provisioner(
+            transport,
+            private_key=private_key_from_bytes(PRIVATE_P),
+            random=lambda n: RANDOM_P,
+            attention=0,
+        ).provision(
+            net_key=NET_KEY, net_key_index=0x0567, iv_index=0x01020304, flags=0, assign=assign
+        )
+        assert result.dev_key == DEV_KEY
+        assert result.unicast == 0x0B0C
+        assert result.element_count == 1
+        assert device.provisioned == DATA
+        assert device.dev_key == DEV_KEY
+        assert written_pdus(transport) == [
+            prov_pdu(PROV_INVITE, INVITE),
+            prov_pdu(PROV_START, START_NO_OOB),
+            prov_pdu(PROV_PUBLIC_KEY, PUBLIC_P),
+            prov_pdu(PROV_CONFIRMATION, CONF_P),
+            prov_pdu(PROV_RANDOM, RANDOM_P),
+            prov_pdu(PROV_DATA, ENCRYPTED),
+        ]
+
+    run(scenario())
+
+
+def test_random_keys_provision_a_two_element_light():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", kind="ctl")
+        assigned = []
+        result = await provision(device, unicast=0x0042, assigned=assigned)
+        assert [caps.elements for caps in assigned] == [2]
+        assert result.element_count == 2
+        assert result.dev_key == device.dev_key
+        assert device.provisioned.unicast == 0x0042
+        assert device.provisioned.net_key == SIM_NET_KEY
+        assert result.dev_key.hex() not in repr(result)
+
+    run(scenario())
+
+
+def test_a_refusing_device_raises_refused_with_its_code():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", refuse=True)
+        with pytest.raises(ProvisioningRefused) as caught:
+            await provision(device)
+        assert caught.value.step == "capabilities"
+        assert caught.value.code == FAILED_OUT_OF_RESOURCES
+        assert "out of resources" in str(caught.value)
+
+    run(scenario())
+
+
+def test_a_bad_device_confirmation_fails_at_random_and_sends_no_data():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", bad_confirmation=True)
+        with pytest.raises(ProvisioningError) as caught:
+            await provision(device)
+        assert caught.value.step == "random"
+        assert PROV_DATA not in device.received
+        assert device.provisioned is None
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("step", STALL_STEPS)
+def test_a_stall_at_each_step_times_out_naming_it(step):
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", stall_at=step)
+        with pytest.raises(ProvisioningError) as caught:
+            await provision(device)
+        assert caught.value.step == step
+        assert "no answer" in caught.value.message
+        # only a stall at "complete" leaves the device holding the network key
+        assert (device.provisioned is not None) == (step == "complete")
+
+    run(scenario())
+
+
+def test_an_oob_only_device_is_refused_before_an_address_is_assigned():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", oob_only=True)
+        assigned = []
+        with pytest.raises(ProvisioningError) as caught:
+            await provision(device, assigned=assigned)
+        assert caught.value.step == "capabilities"
+        assert assigned == []
+        assert device.received == [PROV_INVITE]
+
+    run(scenario())
+
+
+def test_an_assign_error_propagates_and_nothing_more_is_sent():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27")
+        transport = device.connect()
+
+        async def assign(caps):
+            raise MeshError("no free address")
+
+        with pytest.raises(MeshError, match="no free address"):
+            await Provisioner(transport).provision(
+                net_key=SIM_NET_KEY, net_key_index=0, iv_index=0, flags=0, assign=assign
+            )
+        assert device.received == [PROV_INVITE]
+
+    run(scenario())
+
+
+def test_a_dropped_link_names_the_step():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27")
+        transport = device.connect()
+
+        async def assign(caps):
+            transport.drop()
+            return 0x0010
+
+        with pytest.raises(ProvisioningError) as caught:
+            await Provisioner(transport).provision(
+                net_key=SIM_NET_KEY, net_key_index=0, iv_index=0, flags=0, assign=assign
+            )
+        assert caught.value.step == "start"
+        assert caught.value.message == "the link dropped"
+
+    run(scenario())
+
+
+def test_a_drop_while_waiting_is_reported_at_once():
+    async def scenario():
+        device = SimUnprovisioned("AA:00:00:00:00:27", stall_at="public_key")
+        transport = device.connect()
+        provisioner.PUBLIC_KEY_TIMEOUT = 5.0  # restored by the fixture's monkeypatch
+
+        async def drop_soon():
+            await asyncio.sleep(0.05)
+            transport.drop()
+
+        dropper = asyncio.ensure_future(drop_soon())
+        with pytest.raises(ProvisioningError) as caught:
+            await Provisioner(transport).provision(
+                net_key=SIM_NET_KEY, net_key_index=0, iv_index=0, flags=0, assign=assign_0x10
+            )
+        await dropper
+        assert caught.value.step == "public_key"
+        assert caught.value.message == "the link dropped"
+
+    run(scenario())
+
+
+async def assign_0x10(caps):
+    return 0x0010
+
+
+def test_a_device_echoing_our_public_key_is_refused():
+    async def scenario():
+        same = private_key_from_bytes(PRIVATE_P)
+        device = SimUnprovisioned("AA:00:00:00:00:27", private_key=same)
+        with pytest.raises(ProvisioningError) as caught:
+            await provision(device, private_key=same)
+        assert caught.value.step == "public_key"
+        assert "echoed" in caught.value.message
+
+    run(scenario())
+
+
+class Reflector(SimUnprovisioned):
+    """Sends our own confirmation back: the reflection attack."""
+
+    def _on_confirmation(self, params):
+        self._send(PROV_CONFIRMATION, params)
+
+
+class BadPoint(SimUnprovisioned):
+    """Answers with a public key that is not on the curve."""
+
+    def _on_public_key(self, params):
+        self._send(PROV_PUBLIC_KEY, bytes(64))
+
+
+@pytest.mark.parametrize(
+    ("device_class", "step"), [(Reflector, "confirmation"), (BadPoint, "public_key")]
+)
+def test_hostile_devices_fail_before_any_key_is_sent(device_class, step):
+    async def scenario():
+        device = device_class("AA:00:00:00:00:27")
+        with pytest.raises(ProvisioningError) as caught:
+            await provision(device)
+        assert caught.value.step == step
+        assert PROV_DATA not in device.received
+
+    run(scenario())
+
+
+def test_refused_errors_pickle():
+    error = pickle.loads(pickle.dumps(ProvisioningRefused("random", FAILED_CONFIRMATION)))
+    assert (error.step, error.code) == ("random", FAILED_CONFIRMATION)
+    assert "confirmation failed" in str(error)
