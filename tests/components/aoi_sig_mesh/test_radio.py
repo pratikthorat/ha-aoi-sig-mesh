@@ -14,8 +14,11 @@ from homeassistant.core import HomeAssistant
 from custom_components.aoi_sig_mesh.gatt import BleakGattTransport
 from custom_components.aoi_sig_mesh.mesh.errors import MeshError
 from custom_components.aoi_sig_mesh.mesh.provisioner import UnprovisionedDevice
+from custom_components.aoi_sig_mesh.provision import async_unprovisioned
 from custom_components.aoi_sig_mesh.radio import CONNECT_ATTEMPTS, HaBluetoothRadio
+from tests.sim.mesh_sim import SimMesh
 
+from .conftest import make_entry, node_data
 from .test_gatt import FakeClient, FakeService, factory_reset_plug, tuya_bulb
 
 BT = "custom_components.aoi_sig_mesh.radio.bluetooth"
@@ -172,6 +175,32 @@ async def test_lists_unprovisioned_devices_strongest_first(hass: HomeAssistant) 
         UnprovisionedDevice("AA:00:00:00:00:02", "Plug", -50, UUID, 0x0020, remote=True),
         UnprovisionedDevice("AA:00:00:00:00:01", "Plug", -80, UUID, 0x0020, remote=False),
     ]
+
+
+async def test_our_node_leaves_the_list_despite_its_merged_0x1827_entry(
+    hass: HomeAssistant,
+) -> None:
+    """habluetooth merges service data across adverts from one address: a node we provisioned
+    keeps its old 0x1827 entry next to the new 0x1828 one for as long as it advertises."""
+    node = SimMesh().add_node("onoff", unicast=0x0002)
+    entry = make_entry(("Plug", node_data(node, mac="AA:00:00:00:00:01")))
+    entry.add_to_hass(hass)
+    merged = unprovisioned_info("aa:00:00:00:00:01")
+    merged.service_uuids = [PROVISIONING, PROXY]
+    merged.service_data = {**merged.service_data, PROXY: b"\x00" + bytes(8)}
+    adverts = [merged, unprovisioned_info("aa:00:00:00:00:02")]
+    with (
+        patch(f"{BT}.async_discovered_service_info", return_value=adverts),
+        patch(f"{BT}.async_scanner_by_source", return_value=object()),
+    ):
+        assert [d.address for d in async_unprovisioned(hass)] == ["AA:00:00:00:00:02"]
+
+        # deleted here (and so presumably reset): listed again
+        hass.config_entries.async_remove_subentry(entry, next(iter(entry.subentries)))
+        assert [d.address for d in async_unprovisioned(hass)] == [
+            "AA:00:00:00:00:01",
+            "AA:00:00:00:00:02",
+        ]
 
 
 async def test_connect_provisioning_skips_the_service_cache(hass: HomeAssistant) -> None:

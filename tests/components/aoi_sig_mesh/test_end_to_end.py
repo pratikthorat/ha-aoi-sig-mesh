@@ -106,6 +106,9 @@ async def test_factory_reset_devices_become_a_working_switch_and_light(
 
     # 2. A factory-reset lamp (with a Tuya vendor model) is added with Add device.
     radio.advertise_unprovisioned(SimUnprovisioned(LAMP_MAC, kind="ctl", name="Lamp"))
+    # HA's merged adverts still show the plug's 0x1827 data, but it is one of ours now.
+    assert {d.address for d in radio.unprovisioned()} == {PLUG_MAC, LAMP_MAC}
+    assert [d.address for d in provision_module.async_unprovisioned(hass)] == [LAMP_MAC]
     result = await add_device(hass, entry, LAMP_MAC)
     assert result["type"] is FlowResultType.CREATE_ENTRY
     lamp = sim.nodes[0x0003]

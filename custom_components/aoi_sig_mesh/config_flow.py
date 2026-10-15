@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import (
     SOURCE_IGNORE,
@@ -101,6 +102,7 @@ from .provision import (
     async_provision_into_entry,
     async_unprovisioned,
     claim_device,
+    our_node_macs,
     release_device,
 )
 from .store import AddressBook
@@ -220,6 +222,7 @@ class ProvisionSteps:
     """
 
     hass: HomeAssistant
+    flow_id: str
     _form_step = "user"
 
     def __init__(self) -> None:
@@ -239,6 +242,17 @@ class ProvisionSteps:
     def _set_choice(self, device: UnprovisionedDevice, role: str) -> None:
         self._device = device
         self._role = None if role == ROLE_AUTO else role
+
+    def _abort_other_device_flows(self) -> None:
+        """The device is ours now: drop every other discovery of it (one flow per Device
+        UUID), never this flow."""
+        assert self._device is not None
+        flows = self.hass.config_entries.flow
+        for flow in flows.async_progress_by_handler(
+            DOMAIN, match_context={"unique_id": self._device.uuid.hex()}
+        ):
+            if flow["flow_id"] != self.flow_id:
+                flows.async_abort(flow["flow_id"])
 
     async def _async_provision(self, device: UnprovisionedDevice) -> ProvisioningResult:
         raise NotImplementedError
@@ -349,6 +363,9 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
             parsed = parse_provisioning_service_data(unprovisioned)
             if parsed is None:
                 return self.async_abort(reason="not_supported")
+            if discovery_info.address.upper() in our_node_macs(self.hass):
+                # HA merges adverts: one of our nodes still shows the 0x1827 data it had.
+                return self.async_abort(reason="already_configured")
             # One flow per device (its UUID); ignoring it hides only that device.
             await self.async_set_unique_id(parsed[0].hex())
             self._abort_if_unique_id_configured()
@@ -379,7 +396,7 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
         device = next(
             (d for d in async_unprovisioned(self.hass) if d.address == self._address), None
         )
-        if device is None:  # added meanwhile (Add device), reset into another network, or gone
+        if device is None:  # added meanwhile (one of our nodes now), or gone out of range
             if failure is not None:  # the real reason, not "gone"
                 return self.async_abort(
                     reason=failure.reason,
@@ -451,6 +468,7 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
         result, title = self._result, device_title(self._device)
         data = provisioned_subentry_data(result, self._role, self._device.address)
         unique_id = node_unique_id(result.unicast)
+        self._abort_other_device_flows()
         if (entry := self._target) is not None:
             forget_replay(entry, result)
             self.hass.config_entries.async_add_subentry(
@@ -928,6 +946,7 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
         assert self._result is not None and self._device is not None
         result = self._result
         forget_replay(self._get_entry(), result)
+        self._abort_other_device_flows()
         return self.async_create_entry(
             title=device_title(self._device),
             data=provisioned_subentry_data(result, self._role, self._device.address),
@@ -1013,6 +1032,10 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
                     confirmed = True
             if confirmed or user_input[CONF_REMOVE_ANYWAY]:
                 self.hass.config_entries.async_remove_subentry(entry, subentry.subentry_id)
+                if confirmed and (mac := subentry.data.get(CONF_MAC)):
+                    # HA's matcher has seen 0x1827 from this address before, so it would not
+                    # offer the reset device again. After the removal: it is not ours now.
+                    bluetooth.async_rediscover_address(self.hass, str(mac).upper())
                 return self.async_abort(
                     reason="device_reset" if confirmed else "device_removed",
                     description_placeholders=placeholders,

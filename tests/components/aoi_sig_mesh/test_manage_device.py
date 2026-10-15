@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.config_entries import SOURCE_RECONFIGURE
@@ -18,7 +19,7 @@ from custom_components.aoi_sig_mesh.const import (
 )
 from custom_components.aoi_sig_mesh.coordinator import FAILURES_UNAVAILABLE
 from tests.sim.mesh_sim import SimMesh, SimNode
-from tests.sim.sim_radio import SimRadio
+from tests.sim.sim_radio import BULB_MAC, SimRadio
 
 from .conftest import make_entry, node_data, setup_entry, until
 
@@ -36,6 +37,15 @@ async def open_step(hass: HomeAssistant, entry: Any, step: str) -> dict[str, Any
     return await hass.config_entries.subentries.async_configure(
         result["flow_id"], {"next_step_id": step}
     )
+
+
+@pytest.fixture(autouse=True)
+def rediscover() -> Iterator[MagicMock]:
+    """bluetooth.async_rediscover_address (HA's bluetooth is not set up in these tests)."""
+    with patch(
+        "homeassistant.components.bluetooth.async_rediscover_address", autospec=True
+    ) as mock:
+        yield mock
 
 
 @pytest.fixture
@@ -138,7 +148,7 @@ async def test_an_unconfirmed_reset_keeps_the_device_unless_asked_to_remove_it(
 
 @pytest.mark.parametrize(("remove_anyway", "removed"), [(False, False), (True, True)])
 async def test_a_network_that_is_not_running_cannot_reset(
-    hass: HomeAssistant, sim: SimMesh, remove_anyway: bool, removed: bool
+    hass: HomeAssistant, sim: SimMesh, remove_anyway: bool, removed: bool, rediscover: MagicMock
 ) -> None:
     plug = sim.add_node("onoff", unicast=0x00C0)
     entry = make_entry(("Kettle", node_data(plug)))
@@ -154,6 +164,41 @@ async def test_a_network_that_is_not_running_cannot_reset(
         "device_removed" if removed else {"base": "reset_not_running"}
     )
     assert not plug.reset
+    rediscover.assert_not_called()
+
+
+async def test_a_confirmed_reset_lets_bluetooth_discover_the_device_again(
+    hass: HomeAssistant, plug_entry: Any, rediscover: MagicMock
+) -> None:
+    """HA's matcher already holds 0x1827 for this address, so without a rediscover the reset
+    device would never show up as discovered again."""
+    removed_first: list[bool] = []
+    rediscover.side_effect = lambda _hass, _address: removed_first.append(
+        plug_entry.subentries == {}
+    )
+    result = await open_step(hass, plug_entry, "reset_remove")
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"remove_anyway": False}
+    )
+
+    assert result["reason"] == "device_reset"
+    rediscover.assert_called_once_with(hass, BULB_MAC)
+    assert removed_first == [True]  # else the new discovery would see it as one of our nodes
+
+
+async def test_an_unconfirmed_reset_does_not_rediscover_the_device(
+    hass: HomeAssistant, sim: SimMesh, plug_entry: Any, rediscover: MagicMock
+) -> None:
+    sim.silent = True
+    result = await open_step(hass, plug_entry, "reset_remove")
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"remove_anyway": True}
+    )
+
+    assert result["reason"] == "device_removed"
+    rediscover.assert_not_called()
 
 
 async def test_a_confirmed_reset_forgets_the_nodes_replay_entry(

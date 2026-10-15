@@ -94,7 +94,12 @@ def test_a_factory_reset_plug_is_provisioned_configured_and_switched():
         assert "network" not in inspect.signature(provision_device).parameters
         assert network.persistent_state()["seq"] == 100
         assert not device._transport.is_connected  # the PB-GATT link is closed afterwards
-        assert radio.unprovisioned() == []
+        # HA's merged adverts keep the old 0x1827 entry next to the new 0x1828 one, so the
+        # radio still lists the device (the integration drops its own nodes by MAC), but it
+        # can no longer be provisioned.
+        assert [d.address for d in radio.unprovisioned()] == [PLUG_MAC]
+        with pytest.raises(MeshError):
+            await radio.connect_provisioning(PLUG_MAC)
         advert = parse_proxy_service_data(radio.adverts[PLUG_MAC].service_data)
         assert advert.network_id == sim.keys.network_id
         plug = sim.nodes[0x0004]

@@ -74,7 +74,8 @@ class SimRadio:
         self.adverts.pop(device.address, None)
 
     def unprovisioned(self) -> list[UnprovisionedDevice]:
-        """Like HaBluetoothRadio.unprovisioned: strongest first."""
+        """Like HaBluetoothRadio.unprovisioned: every device with 0x1827 data in its merged
+        adverts (a provisioned one too), strongest first."""
         found = [
             UnprovisionedDevice(address, device.name, rssi, device.uuid, device.oob_info, remote)
             for address, (device, rssi, remote) in self._unprovisioned.items()
@@ -86,12 +87,17 @@ class SimRadio:
         found = self._unprovisioned.get(address)
         if found is None or address in self.unreachable:
             raise MeshError(f"cannot connect to {address}")
+        if found[0].provisioned is not None:  # its GATT table has 0x1828 now, not 0x1827
+            raise MeshError("the device has no Mesh Provisioning service")
         return found[0].connect()
 
     def _provisioned(self, device: SimUnprovisioned) -> None:
+        """Like habluetooth (base_scanner.py), which merges service data across adverts from
+        one address as BlueZ does: the old 0x1827 entry stays next to the new 0x1828 one for
+        as long as the device keeps advertising, so it is still listed as unprovisioned."""
         data, dev_key = device.provisioned, device.dev_key
         assert data is not None and dev_key is not None
-        _, rssi, _ = self._unprovisioned.pop(device.address)
+        _, rssi, _ = self._unprovisioned[device.address]
         self.mesh.add_provisioned(data.unicast, dev_key, data.net_key, device.kind)
         network_id = NetworkKeys.from_net_key(data.net_key).network_id
         self.advertise(device.address, rssi=rssi, network_id=network_id, name=device.name)

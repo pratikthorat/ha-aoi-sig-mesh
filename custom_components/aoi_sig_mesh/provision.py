@@ -13,6 +13,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import (
     CONF_ADDRESS,
     CONF_IV_INDEX,
+    CONF_MAC,
     CONF_NET_KEY,
     CONF_NET_KEY_INDEX,
     CONF_RANGE_HIGH,
@@ -52,9 +53,23 @@ class ProvisionFailed(Exception):
         self.detail = detail
 
 
+def our_node_macs(hass: HomeAssistant) -> set[str]:
+    """The MAC (upper case) of every node in any of our networks."""
+    return {
+        str(mac).upper()
+        for entry in hass.config_entries.async_entries(DOMAIN)
+        for subentry in entry.subentries.values()
+        if subentry.subentry_type == SUBENTRY_NODE and (mac := subentry.data.get(CONF_MAC))
+    }
+
+
 def async_unprovisioned(hass: HomeAssistant) -> list[UnprovisionedDevice]:
     """Factory-reset nodes in range of any connectable adapter or proxy, strongest first."""
-    return HaBluetoothRadio(hass).unprovisioned()
+    # HA (habluetooth, like BlueZ) merges service data across adverts from one address, so a
+    # provisioned device keeps its old 0x1827 entry next to 0x1828 while it advertises. Our
+    # own nodes are dropped by MAC; one provisioned by another app may still be listed.
+    ours = our_node_macs(hass)
+    return [d for d in HaBluetoothRadio(hass).unprovisioned() if d.address.upper() not in ours]
 
 
 def _busy(hass: HomeAssistant) -> set[str]:

@@ -21,7 +21,7 @@ from custom_components.aoi_sig_mesh.mesh.pdu import NetworkKeys
 from custom_components.aoi_sig_mesh.store import AddressBook
 from tests.sim.mesh_sim import APP_KEY, NET_KEY, SimMesh
 from tests.sim.prov_sim import SimUnprovisioned
-from tests.sim.sim_radio import SimRadio
+from tests.sim.sim_radio import BULB_MAC, SimRadio
 
 from .conftest import make_entry, until
 
@@ -174,6 +174,18 @@ async def test_a_device_that_stopped_advertising_is_gone(
     result = await discover(hass, SimUnprovisioned(PLUG_MAC, name="Plug"))
 
     assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "device_gone")
+
+
+async def test_a_discovery_for_one_of_our_nodes_aborts(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any
+) -> None:
+    """HA merges adverts, so a node we provisioned still carries its old 0x1827 data."""
+    bulb = SimUnprovisioned(BULB_MAC, name="Mesh CW")
+    radio.advertise_unprovisioned(bulb)
+
+    result = await discover(hass, bulb)
+
+    assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "already_configured")
 
 
 async def test_an_ignored_device_is_not_offered_again(hass: HomeAssistant, radio: SimRadio) -> None:

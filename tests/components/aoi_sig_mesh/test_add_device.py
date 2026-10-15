@@ -22,6 +22,7 @@ from tests.sim.prov_sim import SimUnprovisioned
 from tests.sim.sim_radio import SimRadio
 
 from .conftest import NETWORK_ID, make_entry, until
+from .test_discovery import discover
 
 PLUG_MAC = "DC:23:50:00:00:27"
 LAMP_MAC = "DC:23:50:00:00:28"
@@ -105,6 +106,47 @@ async def test_a_factory_reset_plug_is_added_set_up_and_switched(
         SWITCH_DOMAIN, SERVICE_TURN_ON, {ATTR_ENTITY_ID: "switch.plug"}, blocking=True
     )
     assert plug.on
+
+
+async def test_an_added_device_leaves_the_list_and_comes_back_once_deleted(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any
+) -> None:
+    """HA keeps the old 0x1827 entry in the merged adverts of a device we provisioned: it must
+    not be listed (or be the default) while it is one of our nodes."""
+    radio.advertise_unprovisioned(SimUnprovisioned(PLUG_MAC, name="Plug"), rssi=-30)
+    await add_device(hass, bulb_entry, PLUG_MAC)
+    assert [d.address for d in radio.unprovisioned()] == [PLUG_MAC]  # HA still lists it
+    radio.advertise_unprovisioned(SimUnprovisioned(LAMP_MAC, name="Lamp"), rssi=-70)
+
+    result = await open_add(hass, bulb_entry)
+
+    device_key = next(iter(result["data_schema"].schema))
+    options = result["data_schema"].schema[device_key].config["options"]
+    assert [o["value"] for o in options] == [LAMP_MAC]
+    assert device_key.default() == LAMP_MAC
+    hass.config_entries.subentries.async_abort(result["flow_id"])
+
+    plug = next(s for s in bulb_entry.subentries.values() if s.title == "Plug")
+    hass.config_entries.async_remove_subentry(bulb_entry, plug.subentry_id)
+    assert {d.address for d in provision.async_unprovisioned(hass)} == {PLUG_MAC, LAMP_MAC}
+
+
+async def test_adding_a_device_aborts_its_stale_discovery_card(
+    hass: HomeAssistant, radio: SimRadio, bulb_entry: Any
+) -> None:
+    plug = SimUnprovisioned(PLUG_MAC, name="Plug")
+    radio.advertise_unprovisioned(plug)
+    lamp = SimUnprovisioned(LAMP_MAC, name="Lamp")
+    radio.advertise_unprovisioned(lamp)
+    card = await discover(hass, plug)
+    other = await discover(hass, lamp)
+    assert card["type"] is other["type"] is FlowResultType.FORM
+
+    result = await add_device(hass, bulb_entry, PLUG_MAC)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    in_progress = [f["flow_id"] for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)]
+    assert in_progress == [other["flow_id"]]  # only the plug's card went
 
 
 @pytest.mark.parametrize(("role", "expected"), [("auto", "light"), ("switch", "switch")])
