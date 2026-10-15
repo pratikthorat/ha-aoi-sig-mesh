@@ -17,6 +17,7 @@ from homeassistant.config_entries import SOURCE_USER, ConfigEntryDisabler
 from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.aoi_sig_mesh.const import DOMAIN, TUYA_DOMAIN
@@ -24,7 +25,7 @@ from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
 from tests.sim.mesh_sim import APP_KEY, NET_KEY, SimMesh
 from tests.sim.sim_radio import SimRadio
 
-from .conftest import until
+from .conftest import NETWORK_ID, until
 
 LAMP = "light.mesh_cw"
 OURS = 0x7F00
@@ -62,6 +63,16 @@ async def test_the_bulb_migrates_and_works(
         },
     )
     source.add_to_hass(hass)
+    # The fork's light holds the id every dashboard, automation and voice alias points at.
+    registry = er.async_get(hass)
+    fork = registry.async_get_or_create(
+        LIGHT_DOMAIN,
+        TUYA_DOMAIN,
+        "dc:23:50:00:00:19",
+        config_entry=source,
+        suggested_object_id="mesh_cw",
+    )
+    assert fork.entity_id == LAMP
 
     made: list[MeshCoordinator] = []  # one per setup: the first, then each reload
 
@@ -92,6 +103,10 @@ async def test_the_bulb_migrates_and_works(
         await hass.async_block_till_done()
 
     assert source.disabled_by is ConfigEntryDisabler.USER
+    # The ids moved across: ours took light.mesh_cw, the fork's light stepped aside.
+    ours = registry.async_get_entity_id(LIGHT_DOMAIN, DOMAIN, f"{NETWORK_ID}_00b0_light")
+    assert ours == LAMP
+    assert registry.async_get(fork.id).entity_id == "light.mesh_cw_tuya_ble_mesh"
     assert bulb.has_app_key
     assert bulb.publications and set(bulb.publications.values()) == {OURS}
     state = hass.states.get(LAMP)

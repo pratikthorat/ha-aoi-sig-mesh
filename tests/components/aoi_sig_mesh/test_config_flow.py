@@ -19,6 +19,7 @@ from homeassistant.config_entries import (
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import AbortFlow, FlowResultType
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service_info.bluetooth import BluetoothServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -135,6 +136,105 @@ async def test_import_can_leave_the_old_entry_enabled(hass: HomeAssistant) -> No
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert source.disabled_by is None
+
+
+def fork_entity(hass: HomeAssistant, source: MockConfigEntry, domain: str) -> str:
+    """The old entry's entity, holding ``<domain>.mesh_cw``."""
+    return (
+        er.async_get(hass)
+        .async_get_or_create(
+            domain,
+            TUYA_DOMAIN,
+            "dc:23:50:00:00:19",
+            config_entry=source,
+            suggested_object_id="mesh_cw",
+        )
+        .id
+    )
+
+
+async def register_our_light(hass: HomeAssistant, entry: Any) -> bool:
+    """Stands in for setup: our light, named after the device like the fork's."""
+    er.async_get(hass).async_get_or_create(
+        "light", DOMAIN, "ours", config_entry=entry, suggested_object_id="mesh_cw"
+    )
+    return True
+
+
+def our_light(hass: HomeAssistant) -> str | None:
+    return er.async_get(hass).async_get_entity_id("light", DOMAIN, "ours")
+
+
+async def test_the_old_entitys_id_moves_to_ours(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+    fork = fork_entity(hass, source, "light")
+
+    with patch("custom_components.aoi_sig_mesh.async_setup_entry", side_effect=register_our_light):
+        result = await run_import(hass, source)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert our_light(hass) == "light.mesh_cw"
+    assert er.async_get(hass).async_get(fork).entity_id == "light.mesh_cw_tuya_ble_mesh"
+
+
+async def test_a_taken_fallback_id_gets_the_next_free_one(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+    fork = fork_entity(hass, source, "light")
+    er.async_get(hass).async_get_or_create(
+        "light", "other", "x", suggested_object_id="mesh_cw_tuya_ble_mesh"
+    )
+
+    with patch("custom_components.aoi_sig_mesh.async_setup_entry", side_effect=register_our_light):
+        await run_import(hass, source)
+
+    assert our_light(hass) == "light.mesh_cw"
+    assert er.async_get(hass).async_get(fork).entity_id == "light.mesh_cw_tuya_ble_mesh_2"
+
+
+async def test_entities_of_different_domains_keep_their_ids(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+    fork = fork_entity(hass, source, "switch")
+
+    with patch("custom_components.aoi_sig_mesh.async_setup_entry", side_effect=register_our_light):
+        await run_import(hass, source)
+
+    assert our_light(hass) == "light.mesh_cw"
+    assert er.async_get(hass).async_get(fork).entity_id == "switch.mesh_cw"
+
+
+async def test_a_kept_old_entry_keeps_its_entity_id(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+    fork = fork_entity(hass, source, "light")
+
+    with patch("custom_components.aoi_sig_mesh.async_setup_entry", side_effect=register_our_light):
+        await run_import(hass, source, disable_old=False)
+
+    assert our_light(hass) == "light.mesh_cw_2"
+    assert er.async_get(hass).async_get(fork).entity_id == "light.mesh_cw"
+
+
+async def test_a_failed_rename_does_not_fail_the_import(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+    fork = fork_entity(hass, source, "light")
+    registry = er.async_get(hass)
+    real_update = registry.async_update_entity
+
+    def refuse_ours(entity_id: str, **changes: Any) -> Any:
+        if entity_id == "light.mesh_cw_2":
+            raise ValueError("Entity with this ID is already registered")
+        return real_update(entity_id, **changes)
+
+    with (
+        patch("custom_components.aoi_sig_mesh.async_setup_entry", side_effect=register_our_light),
+        patch.object(registry, "async_update_entity", side_effect=refuse_ours),
+    ):
+        result = await run_import(hass, source)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert source.disabled_by is ConfigEntryDisabler.USER
+    # Ours could not move, so the old entity got its id back.
+    assert our_light(hass) == "light.mesh_cw_2"
+    assert registry.async_get(fork).entity_id == "light.mesh_cw"
 
 
 async def test_reimport_after_delete_never_reuses_our_address(hass: HomeAssistant) -> None:

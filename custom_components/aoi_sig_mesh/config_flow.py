@@ -21,8 +21,10 @@ from homeassistant.config_entries import (
     SubentryFlowResult,
     UnknownEntry,
 )
-from homeassistant.core import callback
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant, callback, split_entity_id
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -73,6 +75,7 @@ from .mesh.proxy import parse_proxy_service_data
 from .store import AddressBook
 
 IDLE_TIMEOUT_MAX = 240  # minutes
+SWAPPED_DOMAINS = (Platform.LIGHT, Platform.SWITCH)  # a node's main entity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -298,9 +301,51 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
     async def async_on_create_entry(self, result: ConfigFlowResult) -> ConfigFlowResult:
-        """Runs once the network entry exists: only now is the old entry disabled."""
+        """Runs once the network entry exists and is set up: only now is the old entry
+        disabled, and then our entities take over its entity ids."""
         await self._async_disable_old()
+        source = self._source
+        if self._disable_old and source is not None and source.disabled_by is not None:
+            take_over_entity_ids(self.hass, source.entry_id, result["result"].entry_id)
         return result
+
+
+@callback
+def take_over_entity_ids(hass: HomeAssistant, source_entry_id: str, entry_id: str) -> None:
+    """Give our light (or switch) the entity id the old entry's entity had.
+
+    Dashboards, automations and voice aliases point at that id. The old entity is renamed to
+    ``<domain>.<object_id>_tuya_ble_mesh`` (or the next free id), then ours takes the freed
+    one. Only one entity per domain on each side is paired; other domains do not clash.
+    Best effort: a registry error is logged and the import goes on.
+    """
+    registry = er.async_get(hass)
+    ours: dict[str, list[er.RegistryEntry]] = {}
+    for entity in er.async_entries_for_config_entry(registry, entry_id):
+        if entity.platform == DOMAIN and entity.domain in SWAPPED_DOMAINS:
+            ours.setdefault(entity.domain, []).append(entity)
+    theirs: dict[str, list[er.RegistryEntry]] = {}
+    for entity in er.async_entries_for_config_entry(registry, source_entry_id):
+        theirs.setdefault(entity.domain, []).append(entity)
+    for domain, mine in ours.items():
+        old = theirs.get(domain, [])
+        if len(mine) != 1 or len(old) != 1:
+            continue  # nothing to swap with, or no telling which goes with which
+        new, wanted = mine[0], old[0].entity_id
+        try:
+            moved = registry.async_get_available_entity_id(
+                domain, f"{split_entity_id(wanted)[1]}_{TUYA_DOMAIN}"
+            )
+            registry.async_update_entity(wanted, new_entity_id=moved)
+            try:
+                registry.async_update_entity(new.entity_id, new_entity_id=wanted)
+            except Exception:
+                registry.async_update_entity(moved, new_entity_id=wanted)  # put it back
+                raise
+        except Exception as err:  # the import has worked: never fail it over a name
+            _LOGGER.warning("Could not give %s the id %s: %s", new.entity_id, wanted, err)
+        else:
+            _LOGGER.info("%s is now %s; the old entity is %s", new.entity_id, wanted, moved)
 
 
 class AoiSigMeshOptionsFlow(OptionsFlow):
