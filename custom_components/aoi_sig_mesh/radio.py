@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
-from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+import bleak_retry_connector
+from bleak_retry_connector import establish_connection
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, callback
 
@@ -68,7 +70,8 @@ class HaBluetoothRadio:
             raise MeshError(f"{address} is not in range of any connectable Bluetooth adapter")
         transport = BleakGattTransport()
         client = await establish_connection(
-            BleakClientWithServiceCache,
+            # Looked up now: HA's bluetooth manager swaps this attribute for its own wrapper.
+            bleak_retry_connector.BleakClientWithServiceCache,
             device,
             f"AoI mesh proxy {address}",
             disconnected_callback=transport.handle_disconnect,
@@ -80,7 +83,8 @@ class HaBluetoothRadio:
         )
         try:
             await transport.async_attach(client)
-        except Exception:
-            await transport.close()
+        except BaseException:  # includes CancelledError: ConnectionManager cancels connects
+            # Shielded, so a second cancel cannot leave the client connected.
+            await asyncio.shield(asyncio.ensure_future(transport.close()))
             raise
         return transport

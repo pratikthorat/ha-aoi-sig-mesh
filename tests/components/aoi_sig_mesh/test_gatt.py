@@ -150,3 +150,16 @@ async def test_a_hung_write_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     async with asyncio.timeout(1):
         with pytest.raises(TimeoutError):
             await transport.write(b"\x00\x01")
+
+
+async def test_a_notification_after_close_is_dropped() -> None:
+    client = tuya_bulb()
+    transport = BleakGattTransport()
+    received: list[bytes] = []
+    transport.set_notify_callback(received.append)
+    await transport.async_attach(client)
+
+    await transport.close()
+    client.notify[0x22](None, bytearray(b"\x01"))
+
+    assert received == []

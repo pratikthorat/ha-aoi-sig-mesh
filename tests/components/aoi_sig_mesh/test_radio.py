@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.components import bluetooth as ha_bluetooth
 from homeassistant.core import HomeAssistant
 
 from custom_components.aoi_sig_mesh.gatt import BleakGattTransport
 from custom_components.aoi_sig_mesh.mesh.errors import MeshError
-from custom_components.aoi_sig_mesh.radio import HaBluetoothRadio
+from custom_components.aoi_sig_mesh.radio import CONNECT_ATTEMPTS, HaBluetoothRadio
 
 from .test_gatt import FakeClient, FakeService, tuya_bulb
 
@@ -69,6 +71,8 @@ async def test_connect_attaches_the_proxy_characteristics(hass: HomeAssistant) -
     assert isinstance(transport, BleakGattTransport)
     assert transport.is_connected
     assert establish.call_args.kwargs["disconnected_callback"] == transport.handle_disconnect
+    assert establish.call_args.kwargs["max_attempts"] == CONNECT_ATTEMPTS
+    assert callable(establish.call_args.kwargs["ble_device_callback"])
 
 
 async def test_a_failed_attach_disconnects_the_client(hass: HomeAssistant) -> None:
@@ -84,3 +88,45 @@ async def test_a_failed_attach_disconnects_the_client(hass: HomeAssistant) -> No
         await HaBluetoothRadio(hass).connect("DC:23:50:00:00:19")
 
     assert client.disconnects == 1
+
+
+async def test_a_cancelled_connect_disconnects_the_client(hass: HomeAssistant) -> None:
+    """ConnectionManager cancels in-flight connects; a connected client must not leak."""
+
+    class HangingNotify(FakeClient):
+        async def start_notify(self, char: Any, callback: Any) -> None:
+            await asyncio.Event().wait()
+
+    client = HangingNotify(services=tuya_bulb().services)
+    with (
+        patch(f"{BT}.async_ble_device_from_address", return_value=object()),
+        patch(
+            "custom_components.aoi_sig_mesh.radio.establish_connection",
+            AsyncMock(return_value=client),
+        ),
+    ):
+        task = asyncio.ensure_future(HaBluetoothRadio(hass).connect("DC:23:50:00:00:19"))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert client.disconnects == 1
+
+
+async def test_subscribe_registers_a_passive_proxy_callback(hass: HomeAssistant) -> None:
+    unsubscribe = MagicMock()
+    with patch(f"{BT}.async_register_callback", return_value=unsubscribe) as register:
+        result = HaBluetoothRadio(hass).subscribe(lambda candidate: None)
+
+    assert result is unsubscribe
+    args = register.call_args.args
+    assert args[0] is hass
+    assert args[2] == ha_bluetooth.BluetoothCallbackMatcher(service_uuid=PROXY, connectable=True)
+    assert args[3] == ha_bluetooth.BluetoothScanningMode.PASSIVE
+    seen = []
+    with patch(f"{BT}.async_register_callback", return_value=unsubscribe) as register:
+        HaBluetoothRadio(hass).subscribe(seen.append)
+    register.call_args.args[1](info("dc:23:50:00:00:19"), None)
+    assert [c.address for c in seen] == ["DC:23:50:00:00:19"]
