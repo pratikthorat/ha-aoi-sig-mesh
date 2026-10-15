@@ -25,7 +25,15 @@ def fast(monkeypatch):
 
 
 class Harness:
-    def __init__(self, *, idle_timeout=0.0, node_macs=(), on_connected=None, on_disconnected=None):
+    def __init__(
+        self,
+        *,
+        idle_timeout=0.0,
+        node_macs=(),
+        node_unicasts=None,
+        on_connected=None,
+        on_disconnected=None,
+    ):
         self.extra_connected = on_connected
         self.extra_disconnected = on_disconnected
         self.sim = SimMesh()
@@ -39,6 +47,7 @@ class Harness:
             self.radio,
             dev_key_for=self.sim.dev_key_for,
             node_addresses=lambda: set(node_macs),
+            node_unicasts=None if node_unicasts is None else lambda: node_unicasts,
             on_connected=self._connected,
             on_disconnected=self._disconnected,
             idle_timeout=idle_timeout,
@@ -102,6 +111,32 @@ def test_node_identity_advert_from_a_known_node_is_used():
         await h.until(lambda: h.manager.link is not None)
         assert h.radio.connects == [BULB_MAC]
         await h.manager.stop()
+
+    run(scenario())
+
+
+def test_node_identity_hash_of_a_known_unicast_is_used_from_any_mac():
+    """A node advertising Node Identity is found by its hash, even with a new or random MAC."""
+
+    async def scenario():
+        h = Harness(node_unicasts=[0x0300, 0x00B0])
+        h.radio.advertise("AA:00:00:00:00:09", identity=True, unicast=0x0042, rssi=-30)
+        h.radio.advertise("AA:00:00:00:00:0A", identity=True, rssi=-40)
+        h.radio.advertise(BULB_MAC, identity=True, unicast=h.bulb.unicast, rssi=-90)
+        assert [c.address for c in h.manager.candidates()] == [BULB_MAC]
+        h.manager.start()
+        await h.until(lambda: h.manager.link is not None)
+        assert h.radio.connects == [BULB_MAC]
+        await h.manager.stop()
+
+    run(scenario())
+
+
+def test_node_identity_of_another_network_is_ignored():
+    async def scenario():
+        h = Harness(node_unicasts=[0x00B0])
+        h.radio.advertise(BULB_MAC, identity=True, unicast=0x00B0, net_key=bytes(16))
+        assert h.manager.candidates() == []
 
     run(scenario())
 

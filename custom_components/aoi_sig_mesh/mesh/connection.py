@@ -10,7 +10,7 @@ import contextlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import Protocol
@@ -63,6 +63,7 @@ class ConnectionManager:
         *,
         dev_key_for: Callable[[int], bytes | None],
         node_addresses: Callable[[], set[str]],
+        node_unicasts: Callable[[], Iterable[int]] | None = None,
         on_connected: Callable[[ProxyLink, ProxyCandidate], Awaitable[None]],
         on_disconnected: Callable[[], None],
         on_message: Callable[[AccessMessage], None] | None = None,
@@ -75,6 +76,7 @@ class ConnectionManager:
         self._radio = radio
         self._dev_key_for = dev_key_for
         self._node_addresses = node_addresses
+        self._node_unicasts = node_unicasts
         self._on_connected = on_connected
         self._on_disconnected = on_disconnected
         self._on_message = on_message
@@ -140,11 +142,18 @@ class ConnectionManager:
                 _LOGGER.exception("Mesh connection loop had failed")
 
     def matches(self, candidate: ProxyCandidate) -> bool:
-        """Our Network ID in the advert, or the MAC of a node we know (Node Identity adverts)."""
+        """Our Network ID in the advert, a Node Identity hash of one of our nodes, or the MAC
+        of a node we know."""
         if candidate.service_data:
             advert = parse_proxy_service_data(candidate.service_data)
-            if advert is not None and advert.network_id == self._network.keys.network_id:
-                return True
+            if advert is not None:
+                keys = self._network.keys
+                if advert.network_id == keys.network_id:
+                    return True
+                if advert.node_hash is not None and self._node_unicasts is not None:
+                    for unicast in self._node_unicasts():
+                        if advert.identifies(keys.identity_key, unicast):
+                            return True
         return candidate.address.upper() in self._node_addresses()
 
     def candidates(self) -> list[ProxyCandidate]:

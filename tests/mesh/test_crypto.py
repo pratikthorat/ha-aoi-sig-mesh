@@ -6,6 +6,7 @@ from mesh.crypto import (
     beacon_key,
     ccm_decrypt,
     ccm_encrypt,
+    identity_key,
     k1,
     k2,
     k3,
@@ -92,6 +93,10 @@ def test_sample_net_key_derivations():
     assert priv == bytes.fromhex("8b84eedec100067d670971dd2aa700cf")
     assert k3(SAMPLE_NET_KEY) == bytes.fromhex("3ecaff672f673370")
     assert beacon_key(SAMPLE_NET_KEY) == bytes.fromhex("5423d967da639a99cb02231a83f7d254")
+
+
+def test_sample_identity_key():
+    assert identity_key(SAMPLE_NET_KEY) == bytes.fromhex("84396c435ac48560b5965385253e210c")
 
 
 def test_sample_app_key_aid():

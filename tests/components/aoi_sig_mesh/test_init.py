@@ -231,6 +231,19 @@ async def test_node_identity_advert_from_a_known_node_is_used(
     await hass.config_entries.async_unload(coordinator.entry.entry_id)
 
 
+async def test_node_identity_hash_finds_a_node_whose_mac_we_never_saw(
+    hass: HomeAssistant, bulb: SimNode, radio: SimRadio
+) -> None:
+    radio.advertise("AA:BB:CC:00:00:01", identity=True, rssi=-80)
+    radio.advertise("AA:BB:CC:00:00:02", identity=True, unicast=bulb.unicast, rssi=-90)
+    coordinator = await setup_entry(hass, make_entry(("Desk lamp", node_data(bulb, mac=None))))
+
+    await until(lambda: coordinator.connected)
+
+    assert radio.connects == ["AA:BB:CC:00:00:02"]
+    await hass.config_entries.async_unload(coordinator.entry.entry_id)
+
+
 async def test_wrong_keys_raise_the_keys_rejected_issue(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:

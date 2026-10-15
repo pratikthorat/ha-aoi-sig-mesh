@@ -8,6 +8,7 @@ from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from .crypto import aes_ecb
 from .errors import LinkClosedError, MeshError, MeshTimeout
 from .models import parse_opcode
 from .network import BeaconOutcome, MeshNetwork
@@ -609,6 +610,26 @@ class ProxyAdvert:
     network_id: bytes | None = None
     node_hash: bytes | None = None
     node_random: bytes | None = None
+
+    def identifies(self, identity_key: bytes, address: int) -> bool:
+        """True if this is a Node Identity advert from the node at ``address``."""
+        if self.node_hash is None or self.node_random is None:
+            return False
+        return node_identity_hash(identity_key, self.node_random, address) == self.node_hash
+
+
+def node_identity_hash(identity_key: bytes, random: bytes, address: int) -> bytes:
+    """The hash in a Node Identity advert: e(IdentityKey, 6 zero bytes || Random || address)."""
+    if len(random) != 8:
+        raise ValueError("the Node Identity random is 8 bytes")
+    return aes_ecb(identity_key, bytes(6) + random + address.to_bytes(2, "big"))[8:]
+
+
+def node_identity_data(identity_key: bytes, random: bytes, address: int) -> bytes:
+    """0x1828 service data of a Node Identity advert (what a node sends; used by tests)."""
+    return (
+        bytes([ADVERT_NODE_IDENTITY]) + node_identity_hash(identity_key, random, address) + random
+    )
 
 
 def parse_proxy_service_data(data: bytes) -> ProxyAdvert | None:

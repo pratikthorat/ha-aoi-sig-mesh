@@ -30,7 +30,14 @@ from mesh.pdu import (
     encrypt_network_pdu,
     proxy_pdus,
 )
-from mesh.proxy import AccessMessage, ProxyAdvert, ProxyLink, parse_proxy_service_data
+from mesh.proxy import (
+    AccessMessage,
+    ProxyAdvert,
+    ProxyLink,
+    node_identity_data,
+    node_identity_hash,
+    parse_proxy_service_data,
+)
 from mesh.transport import encrypt_upper, unsegmented_access
 from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, LoopbackTransport, SimMesh, run
 
@@ -383,6 +390,35 @@ def test_parse_proxy_service_data():
     assert parse_proxy_service_data(b"\x02" + network_id) is None
     assert parse_proxy_service_data(b"\x01" + identity[:15]) is None
     assert parse_proxy_service_data(b"\x01" + identity + b"\x00") is None
+
+
+IDENTITY_RANDOM = bytes.fromhex("34ae608fbbc1f2c6")
+
+
+def test_node_identity_hash_matches_the_sample_data():
+    keys = NetworkKeys.from_net_key(NET_KEY)
+    assert keys.identity_key == bytes.fromhex("84396c435ac48560b5965385253e210c")
+    assert node_identity_hash(keys.identity_key, IDENTITY_RANDOM, 0x1201) == bytes.fromhex(
+        "00861765aefcc57b"
+    )
+
+
+def test_a_node_identity_advert_identifies_only_its_node():
+    keys = NetworkKeys.from_net_key(NET_KEY)
+    data = node_identity_data(keys.identity_key, IDENTITY_RANDOM, 0x1201)
+    assert data == bytes.fromhex("0100861765aefcc57b34ae608fbbc1f2c6")
+    advert = parse_proxy_service_data(data)
+    assert advert.identifies(keys.identity_key, 0x1201)
+    assert not advert.identifies(keys.identity_key, 0x1202)
+    other = NetworkKeys.from_net_key(bytes(16))
+    assert not advert.identifies(other.identity_key, 0x1201)
+    network = parse_proxy_service_data(b"\x00" + keys.network_id)
+    assert not network.identifies(keys.identity_key, 0x1201)
+
+
+def test_node_identity_hash_rejects_a_bad_random():
+    with pytest.raises(ValueError):
+        node_identity_hash(bytes(16), bytes(7), 0x0001)
 
 
 def test_too_far_beacon_warns_once_per_iv_index(caplog):

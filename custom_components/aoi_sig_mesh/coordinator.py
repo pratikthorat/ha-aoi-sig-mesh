@@ -231,6 +231,7 @@ class MeshCoordinator:
             radio,
             dev_key_for=self._dev_key_for,
             node_addresses=self._node_addresses,
+            node_unicasts=self._node_unicasts,
             on_connected=self._async_on_connected,
             on_disconnected=self._on_disconnected,
             on_message=self._on_message,
@@ -310,6 +311,9 @@ class MeshCoordinator:
 
     def _node_addresses(self) -> set[str]:
         return {record.mac for record in self.nodes.values() if record.mac}
+
+    def _node_unicasts(self) -> list[int]:
+        return [record.node.unicast for record in self.nodes.values()]
 
     def record_for(self, address: int) -> NodeRecord | None:
         for record in self.nodes.values():

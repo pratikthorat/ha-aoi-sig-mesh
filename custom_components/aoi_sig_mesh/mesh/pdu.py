@@ -6,7 +6,16 @@ import hmac
 import struct
 from dataclasses import dataclass
 
-from .crypto import aes_cmac, aes_ecb, beacon_key, ccm_decrypt, ccm_encrypt, k2, k3
+from .crypto import (
+    aes_cmac,
+    aes_ecb,
+    beacon_key,
+    ccm_decrypt,
+    ccm_encrypt,
+    identity_key,
+    k2,
+    k3,
+)
 from .errors import MeshAuthError
 
 PDU_NETWORK = 0
@@ -37,11 +46,20 @@ class NetworkKeys:
     priv_key: bytes
     network_id: bytes
     beacon_key: bytes
+    identity_key: bytes
 
     @classmethod
     def from_net_key(cls, net_key: bytes) -> NetworkKeys:
         nid, enc_key, priv_key = k2(net_key)
-        return cls(net_key, nid, enc_key, priv_key, k3(net_key), beacon_key(net_key))
+        return cls(
+            net_key,
+            nid,
+            enc_key,
+            priv_key,
+            k3(net_key),
+            beacon_key(net_key),
+            identity_key(net_key),
+        )
 
     def __repr__(self) -> str:
         return f"NetworkKeys(nid=0x{self.nid:02X})"

@@ -74,6 +74,11 @@ def beacon_key(net_key: bytes) -> bytes:
     return k1(net_key, s1(b"nkbk"), b"id128\x01")
 
 
+def identity_key(net_key: bytes) -> bytes:
+    """IdentityKey used to hash Node Identity adverts."""
+    return k1(net_key, s1(b"nkik"), b"id128\x01")
+
+
 NONCE_LEN = 13
 
 
