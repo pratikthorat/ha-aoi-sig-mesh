@@ -1,7 +1,7 @@
 # AoI Bluetooth SIG Mesh
 
-[![Tests](https://github.com/OWNER/ha-aoi-sig-mesh/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/ha-aoi-sig-mesh/actions/workflows/tests.yml)
-[![Validate](https://github.com/OWNER/ha-aoi-sig-mesh/actions/workflows/validate.yml/badge.svg)](https://github.com/OWNER/ha-aoi-sig-mesh/actions/workflows/validate.yml)
+[![Tests](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/tests.yml/badge.svg)](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/tests.yml)
+[![Validate](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/validate.yml/badge.svg)](https://github.com/pratikthorat/ha-aoi-sig-mesh/actions/workflows/validate.yml)
 
 Control Bluetooth SIG Mesh lights and plugs from Home Assistant. Everything runs locally: there is no vendor hub, no cloud and no account. By Arena of Innovation.
 
@@ -17,7 +17,7 @@ Control Bluetooth SIG Mesh lights and plugs from Home Assistant. Everything runs
 
 You need Home Assistant 2026.5 or newer with Bluetooth set up: a local adapter, or an ESPHome Bluetooth proxy with active connections enabled.
 
-1. In HACS, open the menu, choose **Custom repositories**, and add `https://github.com/OWNER/ha-aoi-sig-mesh` as an **Integration**.
+1. In HACS, open the menu, choose **Custom repositories**, and add `https://github.com/pratikthorat/ha-aoi-sig-mesh` as an **Integration**.
 2. Install **AoI Bluetooth SIG Mesh** and restart Home Assistant.
 
 ## Create a network
@@ -109,7 +109,7 @@ The mesh code is checked against the sample data in the Bluetooth Mesh specifica
 | Adding a factory-reset device | untested on hardware: reports welcome |
 | nRF Mesh import | untested on hardware: reports welcome |
 
-Reports go in the issue tracker at `https://github.com/OWNER/ha-aoi-sig-mesh/issues`.
+Reports go in the issue tracker at `https://github.com/pratikthorat/ha-aoi-sig-mesh/issues`.
 
 ## Credits
 

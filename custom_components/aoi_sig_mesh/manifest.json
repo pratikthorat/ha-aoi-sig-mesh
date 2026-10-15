@@ -11,13 +11,13 @@
       "service_uuid": "00001828-0000-1000-8000-00805f9b34fb"
     }
   ],
-  "codeowners": ["@OWNER"],
+  "codeowners": ["@pratikthorat"],
   "config_flow": true,
   "dependencies": ["bluetooth"],
-  "documentation": "https://github.com/OWNER/ha-aoi-sig-mesh",
+  "documentation": "https://github.com/pratikthorat/ha-aoi-sig-mesh",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/OWNER/ha-aoi-sig-mesh/issues",
+  "issue_tracker": "https://github.com/pratikthorat/ha-aoi-sig-mesh/issues",
   "requirements": [],
   "version": "0.1.0"
 }
