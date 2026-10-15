@@ -33,6 +33,7 @@
       "bad_keys": "The entry's keys are missing or invalid.",
       "bad_iv_index": "The entry's IV index is missing or invalid.",
       "bad_address": "The entry's device address is invalid.",
+      "bad_mac": "The entry's Bluetooth address is missing or invalid.",
       "no_address": "No free address is left for Home Assistant in this network."
     },
     "abort": {

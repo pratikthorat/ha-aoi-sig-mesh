@@ -1,4 +1,7 @@
 import copy
+import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -176,3 +179,58 @@ def test_the_source_mapping_is_not_changed():
     before = copy.deepcopy(TUYA_DATA)
     import_tuya_entry("x", TUYA_DATA)
     assert before == TUYA_DATA
+
+
+@pytest.mark.parametrize(
+    "mac",
+    ["dc:23:50:00:00:19", "DC-23-50-00-00-19", "dc2350000019", "Dc:23:50:00:00:19"],
+)
+def test_a_mac_is_normalised_to_upper_case_colon_form(mac):
+    result = import_tuya_entry("Mesh CW", {**TUYA_DATA, "mac_address": mac})
+    assert result.mac == "DC:23:50:00:00:19"
+
+
+@pytest.mark.parametrize(
+    "mac",
+    [
+        None,
+        "",
+        "dc:23:50:00:00",  # too short
+        "dc:23:50:00:00:19:aa",  # too long
+        "dc235000001",  # 11 digits
+        "zz:23:50:00:00:19",  # not hex
+        "dc:23-50:00:00:19",  # mixed separators
+        "dc:2:50:00:00:19",  # short octet
+        1234567890123,
+        b"dc:23:50:00:00:19",
+        ["dc:23:50:00:00:19"],
+    ],
+)
+def test_a_missing_or_malformed_mac_is_refused(mac):
+    with pytest.raises(TuyaImportError) as err:
+        import_tuya_entry("Mesh CW", {**TUYA_DATA, "mac_address": mac})
+    assert err.value.reason == "bad_mac"
+
+
+def test_a_missing_mac_key_is_refused():
+    data = {key: value for key, value in TUYA_DATA.items() if key != "mac_address"}
+    with pytest.raises(TuyaImportError) as err:
+        import_tuya_entry("Mesh CW", data)
+    assert err.value.reason == "bad_mac"
+
+
+def test_every_import_error_reason_has_a_translation():
+    package = Path(__file__).resolve().parents[2] / "custom_components" / "aoi_sig_mesh"
+    source = (package / "mesh" / "importers.py").read_text()
+    reasons = set(re.findall(r'TuyaImportError\(\s*"(\w+)"', source))
+    assert {
+        "bad_mac",
+        "bad_iv_index",
+        "bad_address",
+        "bad_keys",
+        "not_sig",
+        "no_address",
+    } <= reasons
+    for name in ("strings.json", "translations/en.json"):
+        errors = json.loads((package / name).read_text())["config"]["error"]
+        assert reasons <= errors.keys(), (name, reasons - errors.keys())

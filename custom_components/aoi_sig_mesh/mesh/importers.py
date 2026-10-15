@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +31,8 @@ NODE_RANGE_HIGH = 0x7EFF
 # A node's role addresses must lie within this many elements of its unicast address.
 MAX_IMPORT_ELEMENTS = 16
 IV_INDEX_MAX = 0xFFFFFFFF
+_MAC_SEPARATED = re.compile(r"[0-9A-F]{2}([:-])(?:[0-9A-F]{2}\1){4}[0-9A-F]{2}", re.IGNORECASE)
+_MAC_BARE = re.compile(r"[0-9A-F]{12}", re.IGNORECASE)
 
 
 class TuyaImportError(MeshError):
@@ -74,6 +77,17 @@ def _unicast(data: Mapping[str, Any], name: str, default: str | None = None) -> 
     if not 1 <= value <= UNICAST_MAX:
         raise TuyaImportError("bad_address", f"{name} is not a unicast address")
     return value
+
+
+def _mac(data: Mapping[str, Any]) -> str:
+    """The Bluetooth address as "AA:BB:CC:DD:EE:FF": 6 octets joined by one of ':' '-', or bare."""
+    value = data.get("mac_address")
+    if not isinstance(value, str) or not (
+        _MAC_SEPARATED.fullmatch(value) or _MAC_BARE.fullmatch(value)
+    ):
+        raise TuyaImportError("bad_mac", "mac_address is missing or not a Bluetooth address")
+    digits = re.sub(r"[:-]", "", value).upper()
+    return ":".join(digits[i : i + 2] for i in range(0, 12, 2))
 
 
 def _optional_id(value: Any) -> int | None:
@@ -130,7 +144,7 @@ def import_tuya_entry(
         or not 0 <= iv_index <= IV_INDEX_MAX
     ):
         raise TuyaImportError("bad_iv_index", "iv_index is not an integer from 0 to 0xFFFFFFFF")
-    mac = str(data.get("mac_address", "")).upper()
+    mac = _mac(data)
 
     sig = data.get("sig_models")
     sig = sig if isinstance(sig, Mapping) else {}
