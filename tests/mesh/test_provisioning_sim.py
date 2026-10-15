@@ -1,5 +1,7 @@
 """Provisioning a factory-reset simulated node through SimRadio, then using it on the mesh."""
 
+import inspect
+
 import pytest
 
 from mesh import provisioner, proxy
@@ -76,8 +78,6 @@ def test_a_factory_reset_plug_is_provisioned_configured_and_switched():
         device = SimUnprovisioned(PLUG_MAC, kind="onoff")
         radio.advertise_unprovisioned(device)
         network = MeshNetwork(net_key=NET_KEY, app_key=APP_KEY, address=CLIENT, state={"seq": 100})
-        state_before = network.persistent_state()
-        assert state_before["seq"] == 100
 
         result = await provision_device(
             radio,
@@ -90,8 +90,9 @@ def test_a_factory_reset_plug_is_provisioned_configured_and_switched():
 
         assert result.unicast == 0x0004  # after the bulb's two elements
         assert result.element_count == 1
-        # provision_device never sees the network, so its seq state cannot move
-        assert network.persistent_state() == state_before
+        # Provisioning never takes a network seq because it never sees the network at all.
+        assert "network" not in inspect.signature(provision_device).parameters
+        assert network.persistent_state()["seq"] == 100
         assert not device._transport.is_connected  # the PB-GATT link is closed afterwards
         assert radio.unprovisioned() == []
         advert = parse_proxy_service_data(radio.adverts[PLUG_MAC].service_data)

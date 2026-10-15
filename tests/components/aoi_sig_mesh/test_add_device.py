@@ -348,7 +348,10 @@ async def test_a_task_that_cannot_be_created_frees_the_device_and_raises(
         return real(target, name, *args, **kwargs)
 
     result = await open_add(hass, bulb_entry)
-    with patch.object(hass, "async_create_task", create_task), pytest.raises(Exception):  # noqa: B017, PT011
+    with (
+        patch.object(hass, "async_create_task", create_task),
+        pytest.raises(RuntimeError, match="no task for you"),
+    ):
         await pick(hass, result["flow_id"], PLUG_MAC)
 
     assert hass.data[DOMAIN]["provisioning"] == set()

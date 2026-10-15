@@ -263,7 +263,15 @@ async def test_a_reimport_never_picks_an_address_a_node_already_holds(
 
 def test_every_reason_the_importer_can_raise_has_an_error_string() -> None:
     reasons = set(re.findall(r'NrfImportError\(\s*"(\w+)"', inspect.getsource(importers)))
-    assert {"bad_json", "bad_keys", "key_refresh", "bad_address", "no_address"} <= reasons
+    assert reasons == {
+        "bad_json",
+        "bad_keys",
+        "key_refresh",
+        "no_app_key",
+        "bad_address",
+        "bad_iv_index",
+        "no_address",
+    }, "a new importer reason needs a string and a place in this list"
     errors = json.loads(
         (Path(__file__).parents[3] / "custom_components/aoi_sig_mesh/strings.json").read_text()
     )["config"]["error"]

@@ -411,15 +411,46 @@ def test_refused_errors_pickle():
 # polish: input checks and pinned edges
 
 
+P256_B = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+
+
+def small_x_point() -> tuple[int, int]:
+    """A real P-256 point with the smallest x (so x + p still fits in 32 bytes)."""
+    for x in range(1, 100):
+        rhs = (x**3 - 3 * x + P256_B) % P256_PRIME
+        y = pow(rhs, (P256_PRIME + 1) // 4, P256_PRIME)  # p = 3 mod 4
+        if y * y % P256_PRIME == rhs:
+            return x, y
+    raise AssertionError("no small point found")
+
+
+def test_a_non_canonical_x_plus_p_public_key_is_malformed():
+    """cryptography accepts (x + p, y) for a real point, so this check is the only guard."""
+    key = private_key_from_bytes(PRIVATE_P)
+    x, y = small_x_point()
+    assert x + P256_PRIME < 2**256
+    canonical = x.to_bytes(32, "big") + y.to_bytes(32, "big")
+    ecdh_secret(key, canonical)  # the point itself is valid
+    for bad in (
+        (x + P256_PRIME).to_bytes(32, "big") + y.to_bytes(32, "big"),
+        x.to_bytes(32, "big") + (y + P256_PRIME).to_bytes(32, "big")
+        if y + P256_PRIME < 2**256
+        else None,
+    ):
+        if bad is None:
+            continue
+        with pytest.raises(MalformedPDUError, match="not a valid P-256 point") as caught:
+            ecdh_secret(key, bad)
+        assert caught.value.__cause__ is None  # our check fired, not cryptography's
+
+
 def test_a_public_key_coordinate_at_or_above_p_is_malformed():
     key = private_key_from_bytes(PRIVATE_P)
     x, y = PUBLIC_D[:32], PUBLIC_D[32:]
-    too_big = (int.from_bytes(x, "big") + P256_PRIME).to_bytes(33, "big")[-32:]
     for bad in (
         P256_PRIME.to_bytes(32, "big") + y,
         x + P256_PRIME.to_bytes(32, "big"),
         bytes([0xFF]) * 64,
-        too_big + y,
     ):
         with pytest.raises(MalformedPDUError, match="not a valid P-256 point"):
             ecdh_secret(key, bad)
@@ -466,9 +497,6 @@ def test_a_full_inbox_drops_the_newest_pdu_but_never_the_close_sentinel(caplog):
     async def scenario():
         transport = SimUnprovisioned("AA:00:00:00:00:27").connect()
         prov = Provisioner(transport)
-        prov._transport.set_notify_callback(prov._on_notify)
-        reassembler = ProxyReassembler()
-        assert reassembler is not None
         for i in range(provisioner.INBOX_SIZE + 5):
             payload = prov_pdu(PROV_RANDOM, bytes([i]) * 16)
             for part in proxy_pdus(PDU_PROVISIONING, payload, 20):
@@ -481,6 +509,8 @@ def test_a_full_inbox_drops_the_newest_pdu_but_never_the_close_sentinel(caplog):
         while not prov._inbox.empty():
             items.append(prov._inbox.get_nowait())
         assert items[-1] is None
+        assert items[-2] == b"x"  # queued before the disconnect, still there
+        assert items[0][1] == 2  # PDU 1 was the oldest and made room
         assert len(items) == provisioner.INBOX_SIZE
 
     with caplog.at_level("DEBUG"):
