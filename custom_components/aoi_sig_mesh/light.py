@@ -25,6 +25,7 @@ LIGHTNESS_MAX = 0xFFFF
 
 
 def brightness_to_lightness(brightness: int) -> int:
+    # 0 maps to Lightness 0 (off); HA turns brightness 0 into turn_off before it reaches us.
     return max(0, min(255, brightness)) * 257  # 255 -> 65535
 
 
