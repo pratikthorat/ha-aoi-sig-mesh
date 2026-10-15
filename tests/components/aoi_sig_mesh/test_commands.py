@@ -452,3 +452,48 @@ async def test_an_older_failure_under_a_newer_success_settles_on_what_the_bulb_s
     assert (bulb.lightness, bulb.kelvin) == (0x4000, 4000)
     assert record.state == record.confirmed
     assert (record.state.lightness, record.state.kelvin) == (0x4000, 4000)
+
+    # The settled state is a copy of confirmed: a failing turn-off's optimism (and its revert)
+    # must not reach what the bulb said.
+    async def unanswered(self: NodeCommands, **kwargs: Any) -> None:
+        raise MeshTimeout("no answer")
+
+    with patch.object(NodeCommands, "turn_off", unanswered), pytest.raises(HomeAssistantError):
+        await coordinator.async_turn_off(sid)
+    assert record.confirmed.on is True
+    assert record.state.on is True
+
+
+async def test_an_older_success_keeps_a_newer_pending_commands_optimism(
+    hass: HomeAssistant, bulb: SimNode, bulb_entry: Any
+) -> None:
+    """A (4000 K) succeeds while B (75 %) is pending: B's brightness stays until B is answered."""
+    coordinator, sid = lamp(bulb_entry)
+    await coordinator.async_turn_on(sid, lightness=0x4000, kelvin=3000)
+    record = coordinator.nodes[sid]
+    real_turn_on = NodeCommands.turn_on
+    gates = {"A": asyncio.Event(), "B": asyncio.Event()}
+    entered: set[str] = set()
+
+    async def gated(self: NodeCommands, **kwargs: Any) -> None:
+        name = "A" if kwargs.get("lightness") is None else "B"
+        entered.add(name)
+        await gates[name].wait()
+        await real_turn_on(self, **kwargs)
+
+    with patch.object(NodeCommands, "turn_on", gated):
+        commands = {"A": hass.async_create_task(coordinator.async_turn_on(sid, kelvin=4000))}
+        await until(lambda: "A" in entered)
+        commands["B"] = hass.async_create_task(coordinator.async_turn_on(sid, lightness=0xBFFF))
+        await until(lambda: "B" in entered)
+        gates["A"].set()
+        await commands["A"]
+        assert bulb.kelvin == 4000 and bulb.lightness == 0x4000  # A done, B not sent yet
+        assert record.confirmed.lightness == 0x4000
+        assert (record.state.lightness, record.state.kelvin) == (0xBFFF, 4000)  # not settled
+        gates["B"].set()
+        await commands["B"]
+
+    assert (bulb.lightness, bulb.kelvin) == (0xBFFF, 4000)
+    assert record.state == record.confirmed
+    assert (record.state.lightness, record.state.kelvin) == (0xBFFF, 4000)

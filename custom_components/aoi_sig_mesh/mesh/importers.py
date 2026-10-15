@@ -111,7 +111,7 @@ def _kelvin_range(sig: Mapping[str, Any]) -> tuple[int, int]:
         try:
             low = max(KELVIN_MIN, min(int(rng[0]), KELVIN_MAX))
             high = max(KELVIN_MIN, min(int(rng[1]), KELVIN_MAX))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             low = high = 0
         if low < high:
             return low, high
@@ -151,7 +151,7 @@ def import_tuya_entry(
     sig = sig if isinstance(sig, Mapping) else {}
     try:
         elements = int(sig.get("elements", 1))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         elements = 1
     if elements > MAX_IMPORT_ELEMENTS:
         # A huge count would reserve a big range around the node, which could leave no
@@ -164,7 +164,7 @@ def import_tuya_entry(
         if role in sig:
             try:
                 models[role] = int(sig[role])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
     models.setdefault(ROLE_ONOFF, unicast)
     for role, address in models.items():

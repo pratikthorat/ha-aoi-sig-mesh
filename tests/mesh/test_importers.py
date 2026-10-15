@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from mesh.importers import TuyaImportError, import_tuya_entry, is_tuya_sig_entry
+from mesh.node import KELVIN_DEFAULT_MAX, KELVIN_DEFAULT_MIN
 from tests.sim.mesh_sim import APP_KEY, NET_KEY
 
 DEV_KEY = bytes(range(16))
@@ -123,6 +124,17 @@ def test_a_role_address_grows_the_element_count_within_the_bound():
     node = import_tuya_entry("x", _sig(elements=1, ctl_temp=0xB2)).node
     assert node.element_count == 3
     assert import_tuya_entry("x", _sig(elements=1, ctl_temp=0xB0 + 15)).node.element_count == 16
+
+
+@pytest.mark.parametrize("huge", [float("inf"), float("-inf")])
+def test_an_infinite_number_falls_back_like_any_other_junk(huge):
+    """int(inf) raises OverflowError, not ValueError; JSON's Infinity can put one there."""
+    node = import_tuya_entry("x", _sig(elements=huge)).node
+    assert node.element_count == 2  # the role addresses still say two elements
+    node = import_tuya_entry("x", _sig(lightness=huge)).node
+    assert "lightness" not in node.models
+    node = import_tuya_entry("x", _sig(temp_range=[huge, 6500])).node
+    assert (node.kelvin_min, node.kelvin_max) == (KELVIN_DEFAULT_MIN, KELVIN_DEFAULT_MAX)
 
 
 def test_ids_are_coerced_to_int_or_none():

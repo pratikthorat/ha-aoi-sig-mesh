@@ -281,6 +281,26 @@ def test_idle_policy_disconnects_and_connects_on_demand():
     run(scenario())
 
 
+def test_a_demand_while_idle_does_not_cut_the_backoff_after_a_failed_connect(monkeypatch):
+    """get_link() sets demand and wake together; the wake is spent by the attempt it causes."""
+
+    async def scenario():
+        monkeypatch.setattr(connection, "BACKOFF_MIN", 30.0)
+        h = Harness(idle_timeout=0.1)
+        h.radio.advertise()
+        h.manager.start()
+        await h.until(lambda: len(h.connected) == 1)
+        await h.until(lambda: h.manager.idle)
+        h.radio.fail_connects = 1000
+        attempts = len(h.radio.connects)
+        with pytest.raises(MeshTimeout):
+            await h.manager.get_link(timeout=0.3)  # demand + wake, while the loop is idle
+        assert len(h.radio.connects) == attempts + 1  # one attempt, then the 30 s backoff
+        await h.manager.stop()
+
+    run(scenario())
+
+
 def test_get_link_times_out_without_a_proxy():
     async def scenario():
         h = Harness()

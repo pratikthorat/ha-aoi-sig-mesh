@@ -91,6 +91,8 @@ async def test_the_flow_aborts_when_the_jump_is_gone(
 
     assert result["type"] == "abort"
     assert result["reason"] == "beacon_gone"
+    # Only unloaded: the jump still needs an answer once the entry is back, so it stays listed.
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id(bulb_entry)) is not None
 
 
 async def open_flow(hass: HomeAssistant, entry: Any, issue: ir.IssueEntry) -> IvIndexJumpFlow:
