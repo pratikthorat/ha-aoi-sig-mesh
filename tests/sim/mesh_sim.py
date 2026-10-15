@@ -161,6 +161,10 @@ class SimNode:
     received: list[tuple[int, int, bytes]] = field(default_factory=list)
     tids: dict[int, tuple[int, float]] = field(default_factory=dict)  # dst: (TID, when)
     retransmissions: int = 0
+    appkey_add_status: int | None = None  # overrides the AppKey Status code
+    refuse_bind: set[int] = field(default_factory=set)  # model IDs answered Invalid Model
+    refuse_publication: set[int] = field(default_factory=set)
+    range_on_temp_element: bool = False  # CTL Temperature Range answered by element 1
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -204,6 +208,8 @@ class SimNode:
                 return []
             return self._config(opcode, params)
         model = _target_model(opcode)
+        if model == 0x1303 and opcode == OP_CTL_TEMP_RANGE_GET and self.range_on_temp_element:
+            model = 0x1306
         if model is not None and (dst, model) not in self.bindings:
             return []
         if opcode in SET_LENGTHS and len(params) not in SET_LENGTHS[opcode]:
@@ -240,11 +246,14 @@ class SimNode:
             ]
         if opcode == OP_APPKEY_ADD and len(params) == 19:
             self.has_app_key = True
-            return [(me, encode_opcode(OP_APPKEY_STATUS) + ok + params[:3])]
+            code = ok if self.appkey_add_status is None else bytes([self.appkey_add_status])
+            return [(me, encode_opcode(OP_APPKEY_STATUS) + code + params[:3])]
         if opcode == OP_MODEL_APP_BIND and len(params) in (6, 8):
             element = struct.unpack_from("<H", params)[0]
             model = _model_id(params[4:])
             status = self._model_status(element, model)
+            if model in self.refuse_bind:
+                status = STATUS_INVALID_MODEL
             if status == STATUS_SUCCESS:
                 self.bindings.add((element, model))
             return [(me, encode_opcode(OP_MODEL_APP_STATUS) + bytes([status]) + params)]
@@ -252,6 +261,8 @@ class SimNode:
             element, publish = struct.unpack_from("<HH", params)
             model = _model_id(params[9:])
             status = self._model_status(element, model)
+            if model in self.refuse_publication:
+                status = STATUS_INVALID_MODEL
             if status == STATUS_SUCCESS:
                 self.publications[(element, model)] = publish
             return [(me, encode_opcode(OP_PUBLICATION_STATUS) + bytes([status]) + params)]
@@ -335,6 +346,9 @@ class SimNode:
         return []
 
     def _ctl_temperature(self, opcode: int, params: bytes) -> list[tuple[int, bytes]]:
+        if opcode == OP_CTL_TEMP_RANGE_GET and self.range_on_temp_element:
+            reply = struct.pack("<BHH", STATUS_SUCCESS, self.kelvin_min, self.kelvin_max)
+            return [(self.unicast + 1, encode_opcode(OP_CTL_TEMP_RANGE_STATUS) + reply)]
         if opcode not in (OP_CTL_TEMP_GET, OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK):
             return []
         if opcode != OP_CTL_TEMP_GET and not (self.tuya_quirks and not self.on):

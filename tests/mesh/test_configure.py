@@ -3,6 +3,7 @@ import pytest
 from mesh import proxy
 from mesh.config import CompositionData, Element
 from mesh.configure import ConfigureError, configure_node
+from mesh.models import OP_CTL_TEMP_RANGE_GET
 from mesh.network import MeshNetwork
 from mesh.node import KELVIN_DEFAULT_MAX, KELVIN_DEFAULT_MIN, MeshNode
 from mesh.proxy import ProxyLink
@@ -143,3 +144,87 @@ def test_an_inverted_temperature_range_keeps_the_defaults():
         assert (node.kelvin_min, node.kelvin_max) == (KELVIN_DEFAULT_MIN, KELVIN_DEFAULT_MAX)
 
     run(scenario())
+
+
+def configure(sim, bulb, *, publish=True):
+    async def scenario():
+        network, link = await open_link(sim)
+        node = bare_node(bulb)
+        try:
+            return node, await configure_node(link, network, node, publish=publish)
+        except ConfigureError as err:
+            return node, err
+
+    return run(scenario())
+
+
+def test_a_foreign_appkey_at_our_index_is_a_configure_error():
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.appkey_add_status = 0x06
+    _, err = configure(sim, bulb)
+    assert isinstance(err, ConfigureError)
+    assert err.step == "appkey"
+    assert "different AppKey" in str(err)
+    assert APP_KEY.hex() not in str(err)
+
+
+def test_any_other_appkey_failure_raises_at_the_appkey_step():
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.appkey_add_status = 0x04
+    _, err = configure(sim, bulb)
+    assert isinstance(err, ConfigureError)
+    assert err.step == "appkey"
+
+
+def test_an_appkey_failure_leaves_the_node_unchanged():
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.appkey_add_status = 0x04
+    node, err = configure(sim, bulb)
+    assert isinstance(err, ConfigureError)
+    assert node.element_count == 1
+    assert node.models == {"onoff": bulb.unicast}
+    assert node.cid is None
+
+
+def test_a_refused_bind_leaves_the_role_out_of_bound_and_published():
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.refuse_bind = {0x1300}
+    node, result = configure(sim, bulb)
+    assert result.bound == ["onoff", "ctl", "ctl_temp"]
+    assert result.published == result.bound
+    assert (bulb.unicast, 0x1300) not in bulb.publications
+
+
+def test_a_refused_publication_stays_bound_but_not_published():
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.refuse_publication = {0x1300}
+    node, result = configure(sim, bulb)
+    assert result.bound == ["onoff", "lightness", "ctl", "ctl_temp"]
+    assert result.published == ["onoff", "ctl", "ctl_temp"]
+
+
+def test_the_range_is_read_only_from_bound_elements():
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.refuse_bind = {0x1303}
+    bulb.range_on_temp_element = True
+    bulb.kelvin_min, bulb.kelvin_max = 3000, 6000
+    node, result = configure(sim, bulb)
+    assert result.bound == ["onoff", "lightness", "ctl_temp"]
+    assert result.kelvin_range == (3000, 6000)
+    gets = [dst for dst, op, _ in bulb.received if op == OP_CTL_TEMP_RANGE_GET]
+    assert gets == [bulb.unicast + 1]
+
+
+def test_no_range_read_when_neither_ctl_role_is_bound():
+    sim = SimMesh()
+    bulb = sim.add_node("ctl", configured=False)
+    bulb.refuse_bind = {0x1303, 0x1306}
+    _, result = configure(sim, bulb)
+    assert result.kelvin_range is None
+    assert not [1 for _, op, _ in bulb.received if op == OP_CTL_TEMP_RANGE_GET]

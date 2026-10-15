@@ -36,7 +36,7 @@ from .proxy import ProxyLink
 
 _LOGGER = logging.getLogger(__name__)
 
-STATUS_KEY_INDEX_ALREADY_STORED = 0x06
+STATUS_KEY_INDEX_ALREADY_STORED = 0x06  # a DIFFERENT key is stored at that index
 RANGE_ATTEMPTS = 2
 
 # Generic OnOff first: it is the one model every light and plug has.
@@ -77,7 +77,7 @@ async def configure_node(
         reply = await link.request(
             node.unicast, config_composition_get(0), OP_COMPOSITION_STATUS, dev_key=dev_key
         )
-        node.apply_composition(parse_composition_status(reply.params))
+        composition = parse_composition_status(reply.params)
     except (MeshError, ValueError) as err:
         raise ConfigureError("composition", str(err)) from err
 
@@ -91,8 +91,17 @@ async def configure_node(
         status = parse_status_code(reply.params)
     except MeshError as err:
         raise ConfigureError("appkey", str(err)) from err
-    if status not in (STATUS_SUCCESS, STATUS_KEY_INDEX_ALREADY_STORED):
+    if status == STATUS_KEY_INDEX_ALREADY_STORED:
+        # The spec answers Success when the same key is already stored at this index, so 0x06
+        # means a different key sits there and the node would never decrypt our commands.
+        raise ConfigureError(
+            "appkey",
+            f"a different AppKey is already stored at index {network.app_key_index}; "
+            "reset the device or re-key it",
+        )
+    if status != STATUS_SUCCESS:
         raise ConfigureError("appkey", f"status 0x{status:02X}")
+    node.apply_composition(composition)
 
     result = ConfigureResult()
     for role, model_id in BIND_ORDER:
@@ -118,8 +127,8 @@ async def configure_node(
             if await _config_step(link, node, access, OP_PUBLICATION_STATUS, f"publication {role}"):
                 result.published.append(role)
 
-    if ROLE_CTL_TEMP in result.bound:
-        result.kelvin_range = await _read_range(link, node)
+    if ROLE_CTL in result.bound or ROLE_CTL_TEMP in result.bound:
+        result.kelvin_range = await _read_range(link, node, result.bound)
         if result.kelvin_range is not None:
             node.kelvin_min, node.kelvin_max = result.kelvin_range
     return result
@@ -140,9 +149,10 @@ async def _config_step(
     return True
 
 
-async def _read_range(link: ProxyLink, node: MeshNode) -> tuple[int, int] | None:
+async def _read_range(link: ProxyLink, node: MeshNode, bound: list[str]) -> tuple[int, int] | None:
     """The CTL server owns the range; some Tuya firmware answers on the temperature element."""
-    for address in dict.fromkeys((node.models[ROLE_CTL], node.models[ROLE_CTL_TEMP])):
+    roles = [role for role in (ROLE_CTL, ROLE_CTL_TEMP) if role in bound]
+    for address in dict.fromkeys(node.models[role] for role in roles):
         try:
             reply = await link.request(
                 address,
