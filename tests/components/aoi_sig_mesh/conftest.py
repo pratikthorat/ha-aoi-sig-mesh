@@ -100,6 +100,9 @@ def bulb(sim: SimMesh) -> SimNode:
 def radio(sim: SimMesh, monkeypatch: pytest.MonkeyPatch) -> SimRadio:
     radio = SimRadio(sim)
     monkeypatch.setattr("custom_components.aoi_sig_mesh.HaBluetoothRadio", lambda hass: radio)
+    monkeypatch.setattr(
+        "custom_components.aoi_sig_mesh.provision.HaBluetoothRadio", lambda hass: radio
+    )
     return radio
 
 

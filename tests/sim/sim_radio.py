@@ -26,7 +26,7 @@ class SimRadio:
         self.fail_connects = 0
         self.unreachable: set[str] = set()
         self.provisioning_connects: list[str] = []
-        self._unprovisioned: dict[str, tuple[SimUnprovisioned, int | None]] = {}
+        self._unprovisioned: dict[str, tuple[SimUnprovisioned, int | None, bool]] = {}
         self._callbacks: list[Callable[[ProxyCandidate], None]] = []
 
     def advertise(
@@ -64,17 +64,19 @@ class SimRadio:
 
     # provisioning (0x1827)
 
-    def advertise_unprovisioned(self, device: SimUnprovisioned, *, rssi: int | None = -60) -> None:
+    def advertise_unprovisioned(
+        self, device: SimUnprovisioned, *, rssi: int | None = -60, remote: bool = False
+    ) -> None:
         """A factory-reset node starts advertising; once provisioned it joins ``self.mesh``
         (if given its NetKey) and advertises the Mesh Proxy service instead."""
         device.on_provisioned = self._provisioned
-        self._unprovisioned[device.address] = (device, rssi)
+        self._unprovisioned[device.address] = (device, rssi, remote)
         self.adverts.pop(device.address, None)
 
     def unprovisioned(self) -> list[UnprovisionedDevice]:
         return [
-            UnprovisionedDevice(address, device.name, rssi, device.uuid, device.oob_info)
-            for address, (device, rssi) in self._unprovisioned.items()
+            UnprovisionedDevice(address, device.name, rssi, device.uuid, device.oob_info, remote)
+            for address, (device, rssi, remote) in self._unprovisioned.items()
         ]
 
     async def connect_provisioning(self, address: str) -> ProvisioningLoopback:
@@ -87,7 +89,7 @@ class SimRadio:
     def _provisioned(self, device: SimUnprovisioned) -> None:
         data, dev_key = device.provisioned, device.dev_key
         assert data is not None and dev_key is not None
-        _, rssi = self._unprovisioned.pop(device.address)
+        _, rssi, _ = self._unprovisioned.pop(device.address)
         self.mesh.add_provisioned(data.unicast, dev_key, data.net_key, device.kind)
         network_id = NetworkKeys.from_net_key(data.net_key).network_id
         self.advertise(device.address, rssi=rssi, network_id=network_id, name=device.name)

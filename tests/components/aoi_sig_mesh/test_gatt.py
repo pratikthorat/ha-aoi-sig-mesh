@@ -12,12 +12,15 @@ from custom_components.aoi_sig_mesh import gatt
 from custom_components.aoi_sig_mesh.gatt import (
     DATA_IN_UUID,
     DATA_OUT_UUID,
+    PROVISIONING_DATA_IN_UUID,
+    PROVISIONING_DATA_OUT_UUID,
     BleakGattTransport,
 )
 from custom_components.aoi_sig_mesh.mesh.errors import LinkClosedError, MeshError
 
 TUYA_SERVICE_UUID = "00007fdd-0000-1000-8000-00805f9b34fb"
 PROXY_SERVICE_UUID = "00001828-0000-1000-8000-00805f9b34fb"
+PROVISIONING_SERVICE_UUID = "00001827-0000-1000-8000-00805f9b34fb"
 
 
 @dataclass
@@ -40,6 +43,7 @@ class FakeClient:
     writes: list[tuple[int, bytes, bool]] = field(default_factory=list)
     notify: dict[int, Any] = field(default_factory=dict)
     disconnects: int = 0
+    cache_clears: int = 0
     fail_disconnect: bool = False
     hang_writes: bool = False
 
@@ -50,6 +54,10 @@ class FakeClient:
         if self.hang_writes:
             await asyncio.Event().wait()  # a stuck adapter: the write never returns
         self.writes.append((char.handle, bytes(data), response))
+
+    async def clear_cache(self) -> bool:
+        self.cache_clears += 1
+        return True
 
     async def disconnect(self) -> None:
         self.disconnects += 1
@@ -88,6 +96,59 @@ async def test_uses_the_characteristics_under_the_proxy_service() -> None:
     assert received == [b"\x01\x02"]
     assert transport.max_write == 66
     assert transport.is_connected
+
+
+def factory_reset_plug() -> FakeClient:
+    """An unprovisioned node: Mesh Provisioning (0x1827) with Data In 2ADB / Data Out 2ADC."""
+    return FakeClient(
+        services=[
+            FakeService(
+                PROVISIONING_SERVICE_UUID,
+                [
+                    FakeChar(PROVISIONING_DATA_IN_UUID, 0x30, 20),
+                    FakeChar(PROVISIONING_DATA_OUT_UUID, 0x32),
+                ],
+            )
+        ]
+    )
+
+
+async def test_the_provisioning_transport_uses_2adb_and_2adc_under_1827() -> None:
+    client = factory_reset_plug()
+    transport = BleakGattTransport.provisioning()
+    received: list[bytes] = []
+    transport.set_notify_callback(received.append)
+
+    await transport.async_attach(client)
+    await transport.write(b"\x03\x00\x05")
+    client.notify[0x32](None, bytearray(b"\x03\x01"))
+
+    assert client.writes == [(0x30, b"\x03\x00\x05", False)]
+    assert received == [b"\x03\x01"]
+
+
+async def test_the_provisioning_transport_clears_the_service_cache_on_close() -> None:
+    """After provisioning the device swaps 0x1827 for 0x1828: a cached table would be stale."""
+    client = factory_reset_plug()
+    transport = BleakGattTransport.provisioning()
+    await transport.async_attach(client)
+
+    await transport.close()
+
+    assert (client.cache_clears, client.disconnects) == (1, 1)
+
+
+async def test_a_proxy_without_0x1828_clears_the_cache_and_a_plug_without_1827_is_refused() -> None:
+    proxy = BleakGattTransport()
+    plug = factory_reset_plug()
+    with pytest.raises(MeshError, match="Mesh Proxy"):
+        await proxy.async_attach(plug)
+    await proxy.close()
+    assert plug.cache_clears == 1  # a stale table from before provisioning is dropped
+
+    provisioning = BleakGattTransport.provisioning()
+    with pytest.raises(MeshError, match="Mesh Provisioning"):
+        await provisioning.async_attach(tuya_bulb())
 
 
 async def test_an_unknown_write_size_falls_back_to_twenty_bytes() -> None:

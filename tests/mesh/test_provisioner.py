@@ -21,6 +21,7 @@ from mesh.provisioner import (
     PROV_START,
     START_NO_OOB,
     Capabilities,
+    OobRequired,
     Provisioner,
     ProvisioningData,
     ProvisioningRefused,
@@ -277,7 +278,7 @@ def test_an_oob_only_device_is_refused_before_an_address_is_assigned():
     async def scenario():
         device = SimUnprovisioned("AA:00:00:00:00:27", oob_only=True)
         assigned = []
-        with pytest.raises(ProvisioningError) as caught:
+        with pytest.raises(OobRequired) as caught:
             await provision(device, assigned=assigned)
         assert caught.value.step == "capabilities"
         assert assigned == []

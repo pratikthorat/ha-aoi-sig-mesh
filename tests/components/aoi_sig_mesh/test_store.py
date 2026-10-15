@@ -11,6 +11,7 @@ from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util.file import WriteError
 
+from custom_components.aoi_sig_mesh.mesh.errors import MeshError
 from custom_components.aoi_sig_mesh.store import AddressBook, NetworkStore, StateSaver
 
 KEY = "aoi_sig_mesh.entry1"
@@ -139,3 +140,38 @@ async def test_concurrent_address_adds_are_not_lost(hass: HomeAssistant) -> None
     )
 
     assert await AddressBook(hass).async_used("aa" * 8) == [(0x7F00, 1), (0x7F01, 1), (0x7F02, 1)]
+
+
+async def test_node_reservations_skip_taken_reserved_and_provisioner_addresses(
+    hass: HomeAssistant,
+) -> None:
+    book = AddressBook(hass)
+    await book.async_add("aa" * 8, 0x0003)  # an address we once sent from
+
+    first = await book.async_reserve_node("aa" * 8, 2, taken=[(0x0001, 1)], low=2, high=0x7EFF)
+    second = await book.async_reserve_node("aa" * 8, 1, taken=[(0x0001, 1)], low=2, high=0x7EFF)
+
+    # 0x0002 alone is too small for two elements, but takes the next one-element node
+    assert (first, second) == (0x0004, 0x0002)
+    assert await AddressBook(hass).async_used_nodes("aa" * 8) == [(0x0002, 1), (0x0004, 2)]
+    assert await AddressBook(hass).async_used_nodes("bb" * 8) == []
+    assert await AddressBook(hass).async_used("aa" * 8) == [(0x0003, 1)]
+
+
+async def test_concurrent_node_reservations_never_collide(hass: HomeAssistant) -> None:
+    results = await asyncio.gather(
+        *(
+            AddressBook(hass).async_reserve_node("aa" * 8, 1, taken=[], low=2, high=9)
+            for _ in range(4)
+        )
+    )
+
+    assert sorted(results) == [2, 3, 4, 5]
+
+
+async def test_a_full_range_reserves_nothing(hass: HomeAssistant) -> None:
+    book = AddressBook(hass)
+    with pytest.raises(MeshError):
+        await book.async_reserve_node("aa" * 8, 2, taken=[(2, 1)], low=2, high=3)
+
+    assert await book.async_used_nodes("aa" * 8) == []

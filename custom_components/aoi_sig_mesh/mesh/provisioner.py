@@ -245,6 +245,10 @@ class ProvisioningRefused(ProvisioningError):
         self.message = f"the device refused: {FAILED_REASONS.get(code, f'error 0x{code:02X}')}"
 
 
+class OobRequired(ProvisioningError):
+    """The device accepts only OOB-authenticated provisioning; we provision with No OOB."""
+
+
 @dataclass(frozen=True)
 class ProvisioningResult:
     unicast: int
@@ -306,7 +310,7 @@ class Provisioner:
         if not caps.algorithms & ALGORITHM_FIPS_P256:
             raise ProvisioningError("capabilities", "the device does not support P-256")
         if caps.static_oob_type & STATIC_OOB_ONLY:
-            raise ProvisioningError(
+            raise OobRequired(
                 "capabilities", "the device only accepts OOB authentication, which is unsupported"
             )
         unicast = await assign(caps)

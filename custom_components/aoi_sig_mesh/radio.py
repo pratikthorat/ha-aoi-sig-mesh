@@ -10,10 +10,11 @@ from bleak_retry_connector import establish_connection
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, callback
 
-from .const import PROXY_SERVICE_UUID
+from .const import PROVISIONING_SERVICE_UUID, PROXY_SERVICE_UUID
 from .gatt import BleakGattTransport
 from .mesh.connection import ProxyCandidate
 from .mesh.errors import MeshError
+from .mesh.provisioner import UnprovisionedDevice, parse_provisioning_service_data
 
 CONNECT_ATTEMPTS = 3
 
@@ -64,18 +65,59 @@ class HaBluetoothRadio:
             bluetooth.BluetoothScanningMode.PASSIVE,
         )
 
+    def unprovisioned(self) -> list[UnprovisionedDevice]:
+        """Factory-reset nodes advertising 0x1827, strongest first."""
+        found = []
+        for info in bluetooth.async_discovered_service_info(self._hass, connectable=True):
+            data = info.service_data.get(PROVISIONING_SERVICE_UUID)
+            parsed = parse_provisioning_service_data(data) if data is not None else None
+            if parsed is None:
+                continue
+            scanner = bluetooth.async_scanner_by_source(self._hass, info.source)
+            found.append(
+                UnprovisionedDevice(
+                    address=info.address.upper(),
+                    name=info.name or None,
+                    rssi=info.rssi,
+                    uuid=parsed[0],
+                    oob_info=parsed[1],
+                    remote=isinstance(scanner, bluetooth.BaseHaRemoteScanner),
+                )
+            )
+        found.sort(key=lambda d: -999 if d.rssi is None else d.rssi, reverse=True)
+        return found
+
     async def connect(self, address: str) -> BleakGattTransport:
+        return await self._connect(address, BleakGattTransport(), f"AoI mesh proxy {address}")
+
+    async def connect_provisioning(self, address: str) -> BleakGattTransport:
+        """A PB-GATT connection: separate from the network's proxy link, never cached."""
+        return await self._connect(
+            address,
+            BleakGattTransport.provisioning(),
+            f"AoI mesh provisioning {address}",
+            use_services_cache=False,
+        )
+
+    async def _connect(
+        self,
+        address: str,
+        transport: BleakGattTransport,
+        name: str,
+        *,
+        use_services_cache: bool = True,
+    ) -> BleakGattTransport:
         device = bluetooth.async_ble_device_from_address(self._hass, address, connectable=True)
         if device is None:
             raise MeshError(f"{address} is not in range of any connectable Bluetooth adapter")
-        transport = BleakGattTransport()
         client = await establish_connection(
             # Looked up now: HA's bluetooth manager swaps this attribute for its own wrapper.
             bleak_retry_connector.BleakClientWithServiceCache,
             device,
-            f"AoI mesh proxy {address}",
+            name,
             disconnected_callback=transport.handle_disconnect,
             max_attempts=CONNECT_ATTEMPTS,
+            use_services_cache=use_services_cache,
             ble_device_callback=lambda: (
                 bluetooth.async_ble_device_from_address(self._hass, address, connectable=True)
                 or device

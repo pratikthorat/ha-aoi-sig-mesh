@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
+from .mesh.node import allocate_unicast
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class _StrictStore(Store[dict[str, Any]]):
         async with self._write_lock:
             self._manager.async_invalidate(self.key)
             await self._async_write_data(envelope)
+            # Like Store._async_handle_write_data: no held payload may outlive a write, or the
+            # next async_load on this instance returns it instead of what is on disk.
+            self._data = None
 
 
 class NetworkStore:
@@ -107,11 +111,16 @@ class StateSaver:
             await asyncio.wait(pending)
 
 
-class AddressBook:
-    """``.storage/aoi_sig_mesh.addresses``: provisioner addresses we have sent from.
+NODES_KEY = "nodes"
 
-    Keyed by Network ID (hex). Kept when an entry is deleted, so importing the same network
-    again never reuses an address whose seq values were already spent.
+
+class AddressBook:
+    """``.storage/aoi_sig_mesh.addresses``: provisioner addresses we have sent from, and the
+    node addresses we have given out.
+
+    Keyed by Network ID (hex); node blocks under "nodes". Kept when an entry or a device is
+    deleted, so an address whose seq values were already spent (in our replay cache, or in a
+    node's) is never handed out again.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -129,3 +138,32 @@ class AddressBook:
             used.add(address)
             data[network_id] = sorted(used)
             await self._store.async_save_strict(data)
+
+    async def async_used_nodes(self, network_id: str) -> list[tuple[int, int]]:
+        data = await self._store.async_load() or {}
+        return [(start, count) for start, count in data.get(NODES_KEY, {}).get(network_id, [])]
+
+    async def async_reserve_node(
+        self,
+        network_id: str,
+        count: int,
+        *,
+        taken: list[tuple[int, int]],
+        low: int,
+        high: int,
+    ) -> int:
+        """Pick and save the first free block of ``count`` addresses in [low, high].
+
+        Free of ``taken`` (the network's nodes and our address), every node block given out
+        before and every provisioner address in this book. Raises MeshError when the range is
+        full. Saved before it is returned, so the address is reserved before the device has it.
+        """
+        async with self._lock:
+            data = await self._store.async_load() or {}
+            nodes = data.setdefault(NODES_KEY, {})
+            reserved = [(start, size) for start, size in nodes.get(network_id, [])]
+            used = [(address, 1) for address in data.get(network_id, [])]
+            unicast = allocate_unicast([*taken, *reserved, *used], count, low=low, high=high)
+            nodes[network_id] = [list(block) for block in sorted([*reserved, (unicast, count)])]
+            await self._store.async_save_strict(data)
+            return unicast

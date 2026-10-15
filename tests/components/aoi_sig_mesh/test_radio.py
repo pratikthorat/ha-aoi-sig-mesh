@@ -13,12 +13,15 @@ from homeassistant.core import HomeAssistant
 
 from custom_components.aoi_sig_mesh.gatt import BleakGattTransport
 from custom_components.aoi_sig_mesh.mesh.errors import MeshError
+from custom_components.aoi_sig_mesh.mesh.provisioner import UnprovisionedDevice
 from custom_components.aoi_sig_mesh.radio import CONNECT_ATTEMPTS, HaBluetoothRadio
 
-from .test_gatt import FakeClient, FakeService, tuya_bulb
+from .test_gatt import FakeClient, FakeService, factory_reset_plug, tuya_bulb
 
 BT = "custom_components.aoi_sig_mesh.radio.bluetooth"
 PROXY = "00001828-0000-1000-8000-00805f9b34fb"
+PROVISIONING = "00001827-0000-1000-8000-00805f9b34fb"
+UUID = bytes(range(16))
 
 
 def info(address: str, *, proxy: bool = True, rssi: int = -60) -> Any:
@@ -130,3 +133,68 @@ async def test_subscribe_registers_a_passive_proxy_callback(hass: HomeAssistant)
         HaBluetoothRadio(hass).subscribe(seen.append)
     register.call_args.args[1](info("dc:23:50:00:00:19"), None)
     assert [c.address for c in seen] == ["DC:23:50:00:00:19"]
+
+
+def unprovisioned_info(
+    address: str, *, data: bytes = UUID + b"\x00\x20", rssi: int = -70, source: str = "hci0"
+) -> Any:
+    return SimpleNamespace(
+        address=address,
+        name="Plug",
+        rssi=rssi,
+        service_uuids=[PROVISIONING],
+        service_data={PROVISIONING: data},
+        time=100.0,
+        source=source,
+    )
+
+
+class FakeRemoteScanner(ha_bluetooth.BaseHaRemoteScanner):
+    def __init__(self) -> None:  # no HA scanner state needed: only the type is checked
+        pass
+
+
+async def test_lists_unprovisioned_devices_strongest_first(hass: HomeAssistant) -> None:
+    adverts = [
+        unprovisioned_info("aa:00:00:00:00:01", rssi=-80),
+        unprovisioned_info("aa:00:00:00:00:02", rssi=-50, source="esphome-proxy"),
+        unprovisioned_info("aa:00:00:00:00:03", data=UUID),  # no OOB field: not valid
+        info("dc:23:50:00:00:19"),
+    ]
+    scanners = {"hci0": object(), "esphome-proxy": FakeRemoteScanner()}
+    with (
+        patch(f"{BT}.async_discovered_service_info", return_value=adverts),
+        patch(f"{BT}.async_scanner_by_source", side_effect=lambda hass, s: scanners.get(s)),
+    ):
+        devices = HaBluetoothRadio(hass).unprovisioned()
+
+    assert devices == [
+        UnprovisionedDevice("AA:00:00:00:00:02", "Plug", -50, UUID, 0x0020, remote=True),
+        UnprovisionedDevice("AA:00:00:00:00:01", "Plug", -80, UUID, 0x0020, remote=False),
+    ]
+
+
+async def test_connect_provisioning_skips_the_service_cache(hass: HomeAssistant) -> None:
+    client = factory_reset_plug()
+    with (
+        patch(f"{BT}.async_ble_device_from_address", return_value=object()),
+        patch(
+            "custom_components.aoi_sig_mesh.radio.establish_connection",
+            AsyncMock(return_value=client),
+        ) as establish,
+    ):
+        transport = await HaBluetoothRadio(hass).connect_provisioning("AA:00:00:00:00:01")
+
+    assert transport.is_connected
+    assert establish.call_args.kwargs["use_services_cache"] is False
+    assert establish.call_args.kwargs["disconnected_callback"] == transport.handle_disconnect
+    await transport.write(b"\x03\x00\x05")
+    assert client.writes == [(0x30, b"\x03\x00\x05", False)]
+
+
+async def test_connect_provisioning_needs_a_connectable_adapter(hass: HomeAssistant) -> None:
+    with (
+        patch(f"{BT}.async_ble_device_from_address", return_value=None),
+        pytest.raises(MeshError),
+    ):
+        await HaBluetoothRadio(hass).connect_provisioning("AA:00:00:00:00:01")

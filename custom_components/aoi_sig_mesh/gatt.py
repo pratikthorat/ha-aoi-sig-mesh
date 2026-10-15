@@ -7,32 +7,64 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from .const import PROXY_SERVICE_UUID
+from .const import PROVISIONING_SERVICE_UUID, PROXY_SERVICE_UUID
 from .mesh.errors import LinkClosedError, MeshError
 
 _LOGGER = logging.getLogger(__name__)
 
 DATA_IN_UUID = "00002add-0000-1000-8000-00805f9b34fb"
 DATA_OUT_UUID = "00002ade-0000-1000-8000-00805f9b34fb"
+PROVISIONING_DATA_IN_UUID = "00002adb-0000-1000-8000-00805f9b34fb"
+PROVISIONING_DATA_OUT_UUID = "00002adc-0000-1000-8000-00805f9b34fb"
+CACHE_CLEAR_TIMEOUT = 5.0
 MIN_WRITE = 20  # ATT_MTU 23 - 3
 WRITE_TIMEOUT = 5.0  # seconds; read at call time, so tests can shorten it
 
 
 class BleakGattTransport:
-    """One bleak client. Characteristics are resolved under service 0x1828 and used by handle,
-    because Tuya also exposes 2ADD/2ADE under its own 0x7FDD service.
+    """One bleak client. Characteristics are resolved under one service (0x1828 Mesh Proxy by
+    default) and used by handle, because Tuya also exposes 2ADD/2ADE under its own 0x7FDD
+    service.
 
     Create it first, pass ``handle_disconnect`` as bleak's disconnected callback, then
     ``async_attach`` the connected client.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        service_uuid: str = PROXY_SERVICE_UUID,
+        data_in_uuid: str = DATA_IN_UUID,
+        data_out_uuid: str = DATA_OUT_UUID,
+        *,
+        label: str = "Mesh Proxy",
+        clear_cache_on_close: bool = False,
+    ) -> None:
+        self._service_uuid = service_uuid
+        self._data_in_uuid = data_in_uuid
+        self._data_out_uuid = data_out_uuid
+        self._label = label
+        self._clear_cache_on_close = clear_cache_on_close
         self._client: Any = None
         self._data_in: Any = None
         self._notify: Callable[[bytes], None] | None = None
         self._disconnect: Callable[[], None] | None = None
         self._closed = False
         self.max_write = MIN_WRITE
+
+    @classmethod
+    def provisioning(cls) -> BleakGattTransport:
+        """PB-GATT: Data In 2ADB / Data Out 2ADC under the Mesh Provisioning Service (0x1827).
+
+        The device's GATT table changes once it is provisioned (0x1827 goes, 0x1828 comes), so
+        the service cache is cleared on close.
+        """
+        return cls(
+            PROVISIONING_SERVICE_UUID,
+            PROVISIONING_DATA_IN_UUID,
+            PROVISIONING_DATA_OUT_UUID,
+            label="Mesh Provisioning",
+            clear_cache_on_close=True,
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -47,18 +79,23 @@ class BleakGattTransport:
     async def async_attach(self, client: Any) -> None:
         self._client = client  # set first, so close() disconnects it if a check below fails
         service = next(
-            (s for s in client.services if str(s.uuid).lower() == PROXY_SERVICE_UUID), None
+            (s for s in client.services if str(s.uuid).lower() == self._service_uuid), None
         )
         if service is None:
-            raise MeshError("the device has no Mesh Proxy service")
+            # Perhaps a table cached before the device was provisioned: drop it, so the next
+            # connect discovers the services again.
+            self._clear_cache_on_close = True
+            raise MeshError(f"the device has no {self._label} service")
         chars = {str(c.uuid).lower(): c for c in service.characteristics}
-        data_in, data_out = chars.get(DATA_IN_UUID), chars.get(DATA_OUT_UUID)
+        data_in, data_out = chars.get(self._data_in_uuid), chars.get(self._data_out_uuid)
         if data_in is None or data_out is None:
-            raise MeshError("the Mesh Proxy service lacks Data In/Out")
+            raise MeshError(f"the {self._label} service lacks Data In/Out")
         self._data_in = data_in
         self.max_write = max(MIN_WRITE, int(data_in.max_write_without_response_size or 0))
         await client.start_notify(data_out, self._on_notify)
-        _LOGGER.debug("Proxy characteristics: in=%s out=%s", data_in.handle, data_out.handle)
+        _LOGGER.debug(
+            "%s characteristics: in=%s out=%s", self._label, data_in.handle, data_out.handle
+        )
 
     def handle_disconnect(self, client: Any) -> None:
         """bleak's disconnected callback. Callbacks from any other client are stale."""
@@ -88,6 +125,13 @@ class BleakGattTransport:
         client = self._client
         if client is None:
             return
+        clear_cache = getattr(client, "clear_cache", None)
+        if self._clear_cache_on_close and clear_cache is not None:
+            try:
+                async with asyncio.timeout(CACHE_CLEAR_TIMEOUT):
+                    await clear_cache()
+            except Exception as err:  # closing must never raise
+                _LOGGER.debug("Ignoring error while clearing the service cache: %s", err)
         try:
             await client.disconnect()
         except Exception as err:  # closing must never raise
