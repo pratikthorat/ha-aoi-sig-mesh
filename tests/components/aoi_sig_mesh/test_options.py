@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from types import MappingProxyType
 from typing import Any
+from unittest.mock import patch
 
 import pytest
-from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER, ConfigSubentry
+from homeassistant.config_entries import (
+    SOURCE_RECONFIGURE,
+    SOURCE_USER,
+    ConfigEntryState,
+    ConfigSubentry,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
@@ -301,4 +307,52 @@ async def test_reconfigure_defaults_to_the_stored_role_only_when_it_is_valid(
     await setup_entry(hass, entry)
 
     assert await _form_default_role(hass, entry, next(iter(entry.subentries))) == expected
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize(("kind", "expected"), [("onoff", "switch"), ("ctl", "light")])
+async def test_reconfigure_defaults_to_what_the_node_is_without_a_stored_role(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio, kind: str, expected: str
+) -> None:
+    node = sim.add_node(kind, unicast=0x00C0)
+    data = node_data(node)
+    del data["role"]
+    entry = make_entry(("Hall node", data))
+    await setup_entry(hass, entry)
+
+    assert await _form_default_role(hass, entry, next(iter(entry.subentries))) == expected
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_change_made_while_the_network_sets_up_is_applied(
+    hass: HomeAssistant, sim: SimMesh, bulb: Any, radio: SimRadio
+) -> None:
+    """The update listener skips an entry that is not loaded yet: setup checks again at the end."""
+    radio.advertise()
+    entry = make_entry(("Desk lamp", node_data(bulb)))
+    real_prime = MeshCoordinator.async_prime
+    primed: list[MeshCoordinator] = []
+
+    async def prime_after_a_role_change(self: MeshCoordinator) -> None:
+        primed.append(self)
+        if len(primed) == 1:
+            subentry = next(iter(entry.subentries.values()))
+            hass.config_entries.async_update_subentry(
+                entry, subentry, data={**subentry.data, "role": "switch"}
+            )
+        await real_prime(self)
+
+    entry.add_to_hass(hass)
+    with patch.object(MeshCoordinator, "async_prime", prime_after_a_role_change):
+        # Not setup_entry: the reload may already be unloading when async_setup returns.
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert len(primed) == 2  # set up, then reloaded exactly once
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data is primed[1]
+    assert hass.states.get("switch.desk_lamp") is not None
+    assert (
+        er.async_get(hass).async_get_entity_id("light", DOMAIN, f"{NETWORK_ID}_00b0_light") is None
+    )
     await hass.config_entries.async_unload(entry.entry_id)

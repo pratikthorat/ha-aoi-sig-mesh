@@ -7,8 +7,16 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 
-from .const import DOMAIN, ROLE_LIGHT
+from .const import (
+    DOMAIN,
+    ISSUE_IV_INDEX_JUMP,
+    ISSUE_KEYS_REJECTED,
+    ISSUE_NO_PROXY,
+    ISSUE_NODE_UNREADABLE,
+    ROLE_LIGHT,
+)
 from .coordinator import MeshCoordinator
 from .entity import network_device_info
 from .radio import HaBluetoothRadio
@@ -38,6 +46,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool:
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     coordinator.start()
+    if coordinator.needs_reload():
+        # Changed while we set up: the update listener skipped it (not loaded yet). The
+        # reload waits for this setup to finish.
+        hass.config_entries.async_schedule_reload(entry.entry_id)
     return True
 
 
@@ -49,7 +61,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> None:
-    """Deleting the network deletes its mesh state; the address book keeps its addresses."""
+    """Deleting the network deletes its state and issues; the address book keeps its addresses."""
+    for issue in (ISSUE_IV_INDEX_JUMP, ISSUE_KEYS_REJECTED, ISSUE_NO_PROXY, ISSUE_NODE_UNREADABLE):
+        ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")
     await NetworkStore(hass, entry.entry_id).async_remove()
 
 

@@ -235,7 +235,7 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         ):
             # The network was added or removed while the form was open.
             return self.async_abort(
-                reason="no_import_source" if existing is None else "already_configured"
+                reason="network_gone" if existing is None else "already_configured"
             )
         if existing is not None:
             if (reason := self._join_conflict(existing, node_import)) is not None:
@@ -259,7 +259,8 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         if ignored is not None:
             # HA skips async_on_create_entry when it replaces an ignored entry, so clear it
             # ourselves; an ignored entry holds no state.
-            await self.hass.config_entries.async_remove(ignored.entry_id)
+            with contextlib.suppress(UnknownEntry):  # the user removed it meanwhile
+                await self.hass.config_entries.async_remove(ignored.entry_id)
         return self.async_create_entry(
             title=self._name,
             data={

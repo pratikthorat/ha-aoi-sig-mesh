@@ -9,9 +9,11 @@ from homeassistant.components.repairs import RepairsFlow
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import issue_registry as ir
 
-from .const import ISSUE_IV_INDEX_JUMP
+from .const import DOMAIN, ISSUE_IV_INDEX_JUMP
 from .coordinator import MeshCoordinator
+from .mesh.pdu import SecureBeacon
 
 
 class IvIndexJumpFlow(RepairsFlow):
@@ -19,10 +21,14 @@ class IvIndexJumpFlow(RepairsFlow):
 
     def __init__(self, entry_id: str) -> None:
         self._entry_id = entry_id
+        self._shown: SecureBeacon | None = None  # the jump the form asked about
 
     def _coordinator(self) -> MeshCoordinator | None:
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
-        if entry is None or entry.state is not ConfigEntryState.LOADED:
+        if entry is None:  # the network was deleted: nothing would ever clear its issue
+            ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_IV_INDEX_JUMP}_{self._entry_id}")
+            return None
+        if entry.state is not ConfigEntryState.LOADED:
             return None
         coordinator: MeshCoordinator = entry.runtime_data
         return coordinator if coordinator.pending_iv_jump is not None else None
@@ -34,16 +40,21 @@ class IvIndexJumpFlow(RepairsFlow):
         coordinator = self._coordinator()
         if coordinator is None or coordinator.pending_iv_jump is None:
             return self.async_abort(reason="beacon_gone")
-        if user_input is not None:
-            await coordinator.async_accept_iv_jump()
-            return self.async_create_entry(data={})
+        if user_input is not None and coordinator.pending_iv_jump == self._shown:
+            await coordinator.async_accept_iv_jump(coordinator.pending_iv_jump)
+            if coordinator.pending_iv_jump is None:
+                return self.async_create_entry(data={})
+            # A newer jump came in during the save: finishing would delete its issue.
+        # Not the jump the user saw (or a newer one arrived): ask about this one.
+        pending = coordinator.pending_iv_jump
+        self._shown = pending
         return self.async_show_form(
             step_id="confirm",
             data_schema=vol.Schema({}),
             description_placeholders={
                 "network": coordinator.entry.title,
                 "ours": str(coordinator.network.iv_index),
-                "theirs": str(coordinator.pending_iv_jump.iv_index),
+                "theirs": str(pending.iv_index),
             },
         )
 

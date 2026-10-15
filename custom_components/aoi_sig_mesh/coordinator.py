@@ -616,18 +616,22 @@ class MeshCoordinator:
             self.pending_iv_jump = None
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
 
-    async def async_accept_iv_jump(self) -> None:
-        """The user confirmed the pending jump (repair flow): adopt it and save it."""
-        beacon = self.pending_iv_jump
-        if beacon is None:
-            raise ValueError("no IV index jump is pending")
+    async def async_accept_iv_jump(self, beacon: SecureBeacon) -> None:
+        """The user confirmed ``beacon`` (repair flow): adopt it and save it.
+
+        Raises ``ValueError`` unless ``beacon`` is still the pending jump: the user agreed to
+        that IV index, not to whichever one a proxy announced since.
+        """
+        if beacon != self.pending_iv_jump:
+            raise ValueError("that IV index jump is no longer pending")
         old = self.network.iv_index
         self.network.accept_iv_jump(beacon)
         self.pending_iv_jump = None
-        # Sends stay refused (SeqNotSaved) until the new block is on disk; a failed write
-        # is retried by the saver, so nothing goes out before it lands.
+        # Sends stay refused (SeqNotSaved) until the new block is on disk; a failed write is
+        # retried by us (_on_save_failed), so nothing goes out before it lands.
         await self._saver.async_flush()
-        ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_IV_INDEX_JUMP}_{self.entry.entry_id}")
+        if self.pending_iv_jump is None:  # a newer jump heard during the write keeps its issue
+            ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_IV_INDEX_JUMP}_{self.entry.entry_id}")
         _LOGGER.warning(
             "%s: IV index jumped from %d to %d on request", self.entry.title, old, beacon.iv_index
         )

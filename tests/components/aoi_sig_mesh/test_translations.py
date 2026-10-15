@@ -32,6 +32,7 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config.error.no_address",
         "config.abort.already_configured",
         "config.abort.no_import_source",
+        "config.abort.network_gone",
         "config.abort.not_supported",
         "config.abort.node_added",
         "config.abort.address_conflict",

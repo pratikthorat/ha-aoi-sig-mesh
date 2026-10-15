@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -13,16 +13,17 @@ from homeassistant.config_entries import (
     SOURCE_IGNORE,
     SOURCE_USER,
     ConfigEntryDisabler,
+    ConfigEntryState,
     ConfigSubentry,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import AbortFlow, FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.service_info.bluetooth import BluetoothServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.aoi_sig_mesh.const import DOMAIN, PROXY_SERVICE_UUID, TUYA_DOMAIN
-from custom_components.aoi_sig_mesh.store import _StrictStore
+from custom_components.aoi_sig_mesh.store import AddressBook, _StrictStore
 from tests.sim.mesh_sim import APP_KEY, NET_KEY, SimNode
 
 from .conftest import NETWORK_ID, make_entry, node_data
@@ -52,10 +53,20 @@ TUYA_DATA: dict[str, Any] = {
 
 
 @pytest.fixture(autouse=True)
-def no_setup() -> Iterator[None]:
-    """Flow tests stop at the entry; setup has its own tests."""
-    with patch("custom_components.aoi_sig_mesh.async_setup_entry", return_value=True):
+async def no_setup(hass: HomeAssistant) -> AsyncIterator[None]:
+    """Flow tests stop at the entry; setup (and so unload) has its own tests.
+
+    The entries are unloaded here, while the stub is in place: the real unload would
+    shut down a coordinator the stubbed setup never made.
+    """
+    with (
+        patch("custom_components.aoi_sig_mesh.async_setup_entry", return_value=True),
+        patch("custom_components.aoi_sig_mesh.async_unload_entry", return_value=True),
+    ):
         yield
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            if entry.state is ConfigEntryState.LOADED:
+                await hass.config_entries.async_unload(entry.entry_id)
 
 
 def tuya_entry(hass: HomeAssistant, title: str = "Mesh CW", **changes: Any) -> MockConfigEntry:
@@ -310,8 +321,68 @@ async def test_the_network_vanishing_at_submit_aborts(hass: HomeAssistant) -> No
     result = await hass.config_entries.flow.async_configure(flow_id, {"disable_old": True})
 
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "no_import_source"
+    assert result["reason"] == "network_gone"
     assert source.disabled_by is None
+
+
+async def test_a_node_overlapping_the_device_added_while_the_form_is_open_aborts(
+    hass: HomeAssistant, bulb: SimNode
+) -> None:
+    """The submit-time recheck: a different node now claims 0x00B1, the device's 2nd element."""
+    existing = make_entry()
+    existing.add_to_hass(hass)
+    source = tuya_entry(hass, unicast_our="0005")
+    flow_id = await open_disable_old(hass, source)
+    other = {**node_data(bulb, mac=None), "unicast": 0xB1, "element_count": 1}
+    hass.config_entries.async_add_subentry(
+        existing,
+        ConfigSubentry(
+            data=MappingProxyType(other), subentry_type="node", title="Other", unique_id="00b1"
+        ),
+    )
+
+    result = await hass.config_entries.flow.async_configure(flow_id, {"disable_old": True})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert not any(sub.unique_id == "00b0" for sub in existing.subentries.values())
+    assert source.disabled_by is None
+
+
+async def test_a_join_refused_by_home_assistant_leaves_the_old_entry_enabled(
+    hass: HomeAssistant,
+) -> None:
+    make_entry().add_to_hass(hass)
+    source = tuya_entry(hass, unicast_our="0005")
+
+    with patch.object(
+        hass.config_entries, "async_add_subentry", side_effect=AbortFlow("already_configured")
+    ):
+        result = await run_import(hass, source)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert source.disabled_by is None
+
+
+async def test_an_ignored_discovery_removed_while_saving_does_not_fail_the_import(
+    hass: HomeAssistant,
+) -> None:
+    ignored = MockConfigEntry(domain=DOMAIN, source=SOURCE_IGNORE, unique_id=NETWORK_ID, data={})
+    ignored.add_to_hass(hass)
+    source = tuya_entry(hass)
+    real_add = AddressBook.async_add
+
+    async def add_and_unignore(self: AddressBook, network_id: str, address: int) -> None:
+        await real_add(self, network_id, address)
+        await hass.config_entries.async_remove(ignored.entry_id)  # the user un-ignored it
+
+    with patch.object(AddressBook, "async_add", add_and_unignore):
+        result = await run_import(hass, source)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    (entry,) = hass.config_entries.async_entries(DOMAIN)
+    assert entry.data["address"] == 0x7F00
 
 
 async def test_a_damaged_subentry_does_not_break_a_join(hass: HomeAssistant, bulb: SimNode) -> None:
