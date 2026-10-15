@@ -11,6 +11,7 @@ from mesh.config import (
     config_composition_get,
     parse_composition_status,
 )
+from mesh.crypto import k4
 from mesh.errors import LinkClosedError, MeshTimeout, SeqNotSaved
 from mesh.models import (
     OP_CTL_TEMP_STATUS,
@@ -20,8 +21,17 @@ from mesh.models import (
     onoff_set,
 )
 from mesh.network import BeaconOutcome, MeshNetwork
-from mesh.pdu import FILTER_ACCEPT, PDU_BEACON, PDU_NETWORK, PDU_PROXY_CONFIG, NetworkKeys
+from mesh.pdu import (
+    FILTER_ACCEPT,
+    PDU_BEACON,
+    PDU_NETWORK,
+    PDU_PROXY_CONFIG,
+    NetworkKeys,
+    encrypt_network_pdu,
+    proxy_pdus,
+)
 from mesh.proxy import AccessMessage, ProxyAdvert, ProxyLink, parse_proxy_service_data
+from mesh.transport import encrypt_upper, unsegmented_access
 from tests.sim.mesh_sim import APP_KEY, CLIENT, NET_KEY, LoopbackTransport, SimMesh, run
 
 
@@ -457,3 +467,84 @@ def test_unsaved_seq_fails_a_send_before_anything_is_written():
         return transport.writes, link.is_connected
 
     assert run(scenario()) == ([], True)
+
+
+def notify_onoff_status_from(transport, src, seq=7):
+    """A valid OnOff Status to CLIENT, encrypted with the real keys, from any ``src``."""
+    access = bytes.fromhex("820401")
+    upper = encrypt_upper(
+        APP_KEY, akf=1, szmic=0, seq=seq, src=src, dst=CLIENT, iv_index=0, access_payload=access
+    )
+    lower = unsegmented_access(upper, akf=1, aid=k4(APP_KEY))
+    pdu = encrypt_network_pdu(
+        NetworkKeys.from_net_key(NET_KEY),
+        ctl=0,
+        ttl=4,
+        seq=seq,
+        src=src,
+        dst=CLIENT,
+        transport_pdu=lower,
+        iv_index=0,
+    )
+    for part in proxy_pdus(PDU_NETWORK, pdu, transport.max_write):
+        transport.notify(part)
+
+
+@pytest.mark.parametrize("src", [0x0000, 0xC000])
+def test_pdu_from_a_non_unicast_src_is_dropped(src):
+    sim = SimMesh()
+    received = []
+
+    async def scenario():
+        network, transport, _ = make_link(sim, on_message=received.append)
+        notify_onoff_status_from(transport, src)
+        notify_onoff_status_from(transport, 0x00B0)  # the same message from a unicast src
+        await asyncio.sleep(0.01)
+        return network.persistent_state()["replay"]
+
+    replay = run(scenario())
+    assert [message.src for message in received] == [0x00B0]
+    assert replay == {str(0x00B0): [0, 7]}  # no replay entry for the bad src
+
+
+def test_unexpected_receive_error_is_logged_and_the_link_stays_up(caplog):
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    def broken_dev_key_for(address):
+        raise RuntimeError("dev key lookup bug")
+
+    async def scenario():
+        transport = sim.connect(beacon=False)
+        network = MeshNetwork(net_key=NET_KEY, app_key=APP_KEY, address=CLIENT)
+        link = ProxyLink(network, transport, dev_key_for=broken_dev_key_for)
+        await link.start()
+        sim.send_access(node.unicast, CLIENT, bytes.fromhex("820401"), dev_key=node.dev_key)
+        await asyncio.sleep(0.01)
+        reply = await link.request(node.unicast, onoff_get(), OP_ONOFF_STATUS)
+        return link.is_connected, reply.params
+
+    with caplog.at_level(logging.DEBUG, logger="mesh.proxy"):
+        assert run(scenario()) == (True, b"\x00")
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "dev key lookup bug" in caplog.text
+
+
+def test_bad_notifications_log_at_debug_only(caplog):
+    sim = SimMesh()
+    node = sim.add_node("ctl")
+
+    async def scenario():
+        _, transport, link = make_link(sim)
+        await link.start()
+        sim.local_change(node, True)
+        await asyncio.sleep(0.01)
+        good = sim.last_network
+        transport.notify(bytes([PDU_NETWORK]) + good[:-1] + bytes([good[-1] ^ 0xFF]))
+        transport.notify(bytes([0x80 | PDU_NETWORK]) + good[:5])  # orphan SAR continuation
+        await asyncio.sleep(0.01)
+
+    with caplog.at_level(logging.DEBUG, logger="mesh.proxy"):
+        run(scenario())
+    assert [r for r in caplog.records if r.levelno > logging.DEBUG] == []

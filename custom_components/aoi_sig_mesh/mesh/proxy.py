@@ -418,8 +418,10 @@ class ProxyLink:
                 self._on_beacon_pdu(payload)
             elif pdu_type == PDU_PROXY_CONFIG:
                 self._on_proxy_config(payload)
-        except Exception:
+        except MeshError:  # parse and auth failures: junk from the radio
             _LOGGER.debug("Dropped a bad proxy notification", exc_info=True)
+        except Exception:
+            _LOGGER.exception("Unexpected error handling a proxy notification")
 
     def _rx_iv_index(self, payload: bytes) -> int | None:
         return self._network.rx_iv_index(payload[0] >> 7) if payload else None
@@ -444,6 +446,8 @@ class ProxyLink:
             return
         if net.dst != network.address and net.dst < GROUP_ADDRESS_MIN:
             return
+        if not 0x0001 <= net.src <= 0x7FFF:
+            return  # only a unicast address may send: no replay entry for anything else
         if not network.accept_replay(net.src, net.seq, iv_index):
             return
         if net.ctl:
