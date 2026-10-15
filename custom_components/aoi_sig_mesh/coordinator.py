@@ -1,0 +1,611 @@
+"""One coordinator per mesh network: the proxy connection, node states and persistence."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import time
+from collections.abc import Awaitable
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any
+
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.util import dt as dt_util
+
+from .const import (
+    CONF_ADDRESS,
+    CONF_APP_KEY,
+    CONF_APP_KEY_INDEX,
+    CONF_CONFIGURED,
+    CONF_IDLE_TIMEOUT,
+    CONF_IV_INDEX,
+    CONF_MAC,
+    CONF_NET_KEY,
+    CONF_NET_KEY_INDEX,
+    CONF_PUBLISH_SETUP,
+    CONF_ROLE,
+    DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_PUBLISH_SETUP,
+    DOMAIN,
+    ISSUE_IV_INDEX_JUMP,
+    ISSUE_KEYS_REJECTED,
+    ISSUE_NO_PROXY,
+    ISSUE_NODE_UNREADABLE,
+    ROLE_LIGHT,
+    ROLE_SWITCH,
+    SUBENTRY_NODE,
+)
+from .mesh.configure import ConfigureError, configure_node
+from .mesh.connection import ConnectionManager, MeshRadio, ProxyCandidate
+from .mesh.control import NodeCommands, NodeState, TidCounter, apply_status
+from .mesh.errors import LinkClosedError, MeshTimeout, SeqNotSaved
+from .mesh.network import BeaconOutcome, MeshNetwork
+from .mesh.node import ROLE_HEALTH, ROLE_LIGHTNESS, MeshNode
+from .mesh.pdu import SecureBeacon
+from .mesh.proxy import AccessMessage, ProxyLink
+from .mesh.quirks import Quirk, is_vendor_opcode, quirks_for
+from .store import NetworkStore, StateSaver
+
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
+
+_LOGGER = logging.getLogger(__name__)
+
+# Read at call time, so tests can shorten them with monkeypatch.
+POLL_INTERVAL = timedelta(minutes=5)
+RSSI_INTERVAL = timedelta(seconds=60)
+REPLAY_SAVE_INTERVAL = timedelta(seconds=30)  # replay cache changes are saved in batches
+SAVE_RETRY_MIN = 1.0  # seconds; a failed save is retried, doubling up to SAVE_RETRY_MAX
+SAVE_RETRY_MAX = 60.0
+LINK_DOWN_GRACE = 30.0  # seconds without a link before nodes go unavailable
+NO_PROXY_ISSUE_AFTER = 600.0  # seconds without a link before the repair issue
+FAILURES_UNAVAILABLE = 3  # unanswered requests in a row
+REFRESH_STAGGER = 0.3  # seconds between nodes when reading every node's state
+COMMAND_CONNECT_TIMEOUT = 15.0
+CONFIGURE_TIMEOUT = 90.0
+FOLLOW_UP_MARGIN = 0.5  # seconds after a transition ends before reading the final state
+
+
+# What MeshNode.from_dict raises for a damaged subentry.
+NODE_DATA_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
+
+
+def read_node(data: Any) -> MeshNode | None:
+    """The node in subentry data, or None when the data is damaged."""
+    try:
+        return MeshNode.from_dict(dict(data))
+    except NODE_DATA_ERRORS:
+        return None
+
+
+def default_role(node: MeshNode) -> str:
+    return ROLE_LIGHT if node.is_light else ROLE_SWITCH
+
+
+def capabilities(node: MeshNode) -> tuple[Any, ...]:
+    """What decides which entities a node gets; a change needs a reload."""
+    return (
+        node.is_light,
+        node.is_tunable,
+        ROLE_LIGHTNESS in node.models,
+        node.kelvin_min,
+        node.kelvin_max,
+        ROLE_HEALTH in node.models and not node.is_light,
+    )
+
+
+@dataclass
+class NodeRecord:
+    """A node subentry plus what we know about it at runtime."""
+
+    subentry_id: str
+    title: str
+    node: MeshNode
+    role: str
+    mac: str | None
+    configured: bool
+    quirks: Quirk
+    state: NodeState = field(default_factory=NodeState)
+    available: bool = True
+    failures: int = 0
+    last_seen: datetime | None = None
+
+
+class MeshCoordinator:
+    """Owns the MeshNetwork, the ConnectionManager and every node's state."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        radio: MeshRadio,
+        store: NetworkStore,
+        state: dict[str, Any] | None,
+    ) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.radio = radio
+        self.store = store
+        self._saver = StateSaver(hass, store, self._on_saved, self._on_save_failed)
+        self._save_retry: CALLBACK_TYPE | None = None
+        self._save_backoff = SAVE_RETRY_MIN
+        self._stopping = False
+        data = entry.data
+        if state is None:
+            state = {
+                "iv_index": int(data.get(CONF_IV_INDEX, 0)),
+                "iv_update": False,
+                "seq": 0,
+                "replay": {},
+            }
+        self.network = MeshNetwork(
+            net_key=bytes.fromhex(data[CONF_NET_KEY]),
+            app_key=bytes.fromhex(data[CONF_APP_KEY]),
+            address=int(data[CONF_ADDRESS]),
+            net_key_index=int(data.get(CONF_NET_KEY_INDEX, 0)),
+            app_key_index=int(data.get(CONF_APP_KEY_INDEX, 0)),
+            state=state,
+            on_persist=self._saver.save,
+            persist_is_durable=False,
+        )
+        self.network_id = self.network.keys.network_id.hex()
+        self.nodes: dict[str, NodeRecord] = {}
+        unreadable: list[str] = []
+        for subentry_id, subentry in entry.subentries.items():
+            if subentry.subentry_type != SUBENTRY_NODE:
+                continue
+            node = read_node(subentry.data)
+            if node is None:
+                _LOGGER.error("%s: the saved device data is damaged; skipped", subentry.title)
+                unreadable.append(subentry.title)
+                continue
+            self.nodes[subentry_id] = NodeRecord(
+                subentry_id=subentry_id,
+                title=subentry.title,
+                node=node,
+                role=subentry.data.get(CONF_ROLE, default_role(node)),
+                mac=(subentry.data.get(CONF_MAC) or "").upper() or None,
+                configured=bool(subentry.data.get(CONF_CONFIGURED, False)),
+                quirks=quirks_for(node.cid, node.pid),
+            )
+        self._report_unreadable(unreadable)
+        self._prune_replay()
+        idle_minutes = float(entry.options.get(CONF_IDLE_TIMEOUT, DEFAULT_IDLE_TIMEOUT))
+        self.manager = ConnectionManager(
+            self.network,
+            radio,
+            dev_key_for=self._dev_key_for,
+            node_addresses=self._node_addresses,
+            on_connected=self._async_on_connected,
+            on_disconnected=self._on_disconnected,
+            on_message=self._on_message,
+            on_beacon=self._on_beacon,
+            idle_timeout=idle_minutes * 60,
+        )
+        self._tids = TidCounter()
+        self._listeners: dict[str | None, list[CALLBACK_TYPE]] = {}
+        self._follow_ups: dict[str, CALLBACK_TYPE] = {}
+        self._unsubs: list[CALLBACK_TYPE] = []
+        self._link_down_timer: CALLBACK_TYPE | None = None
+        self._no_proxy_timer: CALLBACK_TYPE | None = None
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._heard = False
+        self.rssi: int | None = None
+        self.rssi_seen: float | None = None  # time.monotonic() of the advert
+        self.proxy_address: str | None = None
+        self.pending_iv_jump: SecureBeacon | None = None  # a TOO_FAR beacon awaiting the user
+
+    # lookups
+
+    def _report_unreadable(self, titles: list[str]) -> None:
+        issue_id = f"{ISSUE_NODE_UNREADABLE}_{self.entry.entry_id}"
+        if not titles:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_NODE_UNREADABLE,
+            translation_placeholders={"network": self.entry.title, "names": ", ".join(titles)},
+        )
+
+    def _prune_replay(self) -> None:
+        """Forget replay entries of addresses no node owns (removed, maybe re-provisioned).
+
+        The change is saved by ``async_prime``, which writes the whole state.
+        """
+        for src in list(self.network.persistent_state()["replay"]):
+            address = int(src)
+            if not any(record.node.contains(address) for record in self.nodes.values()):
+                self.network.forget_replay(address, 1)
+
+    def _dev_key_for(self, address: int) -> bytes | None:
+        record = self.record_for(address)
+        return record.node.dev_key if record is not None else None
+
+    def _node_addresses(self) -> set[str]:
+        return {record.mac for record in self.nodes.values() if record.mac}
+
+    def record_for(self, address: int) -> NodeRecord | None:
+        for record in self.nodes.values():
+            if record.node.contains(address):
+                return record
+        return None
+
+    @property
+    def connected(self) -> bool:
+        return self.manager.link is not None
+
+    @property
+    def connected_via(self) -> str | None:
+        """The connected proxy: a node's name when it is one of ours, else its name or MAC."""
+        proxy = self.manager.proxy
+        if proxy is None:
+            return None
+        for record in self.nodes.values():
+            if record.mac == proxy.address:
+                return record.title
+        return proxy.name or proxy.address
+
+    @property
+    def rssi_age(self) -> float | None:
+        """Seconds since the proxy's advert behind ``rssi``."""
+        if self.rssi_seen is None:
+            return None
+        return max(0.0, time.monotonic() - self.rssi_seen)
+
+    # listeners
+
+    @callback
+    def async_add_listener(self, key: str | None, update: CALLBACK_TYPE) -> CALLBACK_TYPE:
+        """Call ``update`` when node ``key`` (a subentry id) or the network (None) changes."""
+        self._listeners.setdefault(key, []).append(update)
+
+        @callback
+        def _remove() -> None:
+            self._listeners[key].remove(update)
+
+        return _remove
+
+    @callback
+    def _notify(self, key: str | None) -> None:
+        for update in list(self._listeners.get(key, ())):
+            update()
+
+    @callback
+    def _notify_all(self) -> None:
+        for key in list(self._listeners):
+            self._notify(key)
+
+    # persistence
+
+    @callback
+    def _on_saved(self, state: dict[str, Any]) -> None:
+        self.network.mark_persisted(state)
+        self._save_backoff = SAVE_RETRY_MIN
+
+    @callback
+    def _on_save_failed(self) -> None:
+        """Without a retry ``next_seq`` never reserves again and every send is refused."""
+        if self._stopping or self._save_retry is not None:
+            return
+        delay = self._save_backoff
+        self._save_backoff = min(delay * 2, SAVE_RETRY_MAX)
+        _LOGGER.warning("Retrying the mesh state save in %.0f s", delay)
+        self._save_retry = async_call_later(self.hass, delay, self._retry_save)
+
+    @callback
+    def _retry_save(self, _now: datetime) -> None:
+        self._save_retry = None
+        self.network.prime()  # reserves again (or re-sends the current ceiling) and saves
+
+    async def async_prime(self) -> None:
+        """Reserve the next seq block and wait until it is on disk. Call before ``start``."""
+        self.network.prime()
+        await self._saver.async_flush()
+
+    async def _async_save_state(self) -> None:
+        """Write the whole state now and wait for it (and for any write still queued)."""
+        self._saver.save(self.network.persistent_state())
+        await self._saver.async_flush()
+
+    @callback
+    def _replay_tick(self, _now: datetime) -> None:
+        if self.network.take_replay_dirty():
+            self._saver.save(self.network.persistent_state())
+
+    @callback
+    def async_forget_node(self, unicast: int, element_count: int) -> None:
+        """A node was reset or provisioned again: accept its restarted seq from now on."""
+        if (link := self.manager.link) is not None:
+            link.forget_node(unicast, element_count)
+        else:
+            self.network.forget_replay(unicast, element_count)
+
+    # lifecycle
+
+    @callback
+    def start(self) -> None:
+        self._link_down()
+        self.manager.start()
+        self._unsubs.append(
+            async_track_time_interval(self.hass, self._replay_tick, REPLAY_SAVE_INTERVAL)
+        )
+        self._unsubs.append(async_track_time_interval(self.hass, self._async_poll, POLL_INTERVAL))
+        self._unsubs.append(async_track_time_interval(self.hass, self._rssi_tick, RSSI_INTERVAL))
+        self._unsubs.append(self.radio.subscribe(self._on_advert))
+
+    async def async_shutdown(self) -> None:
+        """Stop everything and write the mesh state (seq ceiling, IV, replay cache)."""
+        if self._stopping:
+            return
+        self._stopping = True
+        for unsub in self._unsubs:
+            unsub()
+        self._unsubs.clear()
+        for cancel in self._follow_ups.values():
+            cancel()
+        self._follow_ups.clear()
+        self._cancel_link_timers()
+        if self._save_retry is not None:
+            self._save_retry()
+            self._save_retry = None
+        await self.manager.stop()
+        for task in list(self._tasks):
+            task.cancel()
+        for task in list(self._tasks):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self.network.take_replay_dirty()  # the full state below includes the replay cache
+        await self._async_save_state()
+
+    def _spawn(self, coro: Awaitable[Any], name: str) -> None:
+        task = self.entry.async_create_background_task(self.hass, coro, name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    # connection events
+
+    async def _async_on_connected(self, link: ProxyLink, proxy: ProxyCandidate) -> None:
+        self._cancel_link_timers()
+        ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_NO_PROXY}_{self.entry.entry_id}")
+        self.proxy_address = proxy.address
+        self.rssi, self.rssi_seen = proxy.rssi, proxy.seen
+        self._update_rssi()
+        self._notify(None)
+        for record in list(self.nodes.values()):
+            if not record.configured:
+                await self._async_configure(link, record)
+        await self._async_refresh_all(link)
+        self._check_keys()
+
+    @callback
+    def _on_disconnected(self) -> None:
+        self._notify(None)
+        if not self._stopping:
+            self._link_down()
+
+    @callback
+    def _link_down(self) -> None:
+        """Start the grace timer (nodes unavailable) and the no-proxy repair timer."""
+        self._cancel_link_timers()
+        self._link_down_timer = async_call_later(
+            self.hass, LINK_DOWN_GRACE, self._link_down_expired
+        )
+        self._no_proxy_timer = async_call_later(
+            self.hass, NO_PROXY_ISSUE_AFTER, self._no_proxy_expired
+        )
+
+    @callback
+    def _cancel_link_timers(self) -> None:
+        for timer in (self._link_down_timer, self._no_proxy_timer):
+            if timer is not None:
+                timer()
+        self._link_down_timer = self._no_proxy_timer = None
+
+    @callback
+    def _link_down_expired(self, _now: datetime) -> None:
+        self._link_down_timer = None
+        if self.connected or self.manager.idle:
+            return
+        for record in self.nodes.values():
+            record.available = False
+        self._notify_all()
+
+    @callback
+    def _no_proxy_expired(self, _now: datetime) -> None:
+        self._no_proxy_timer = None
+        if self.connected or self.manager.idle:
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            f"{ISSUE_NO_PROXY}_{self.entry.entry_id}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_NO_PROXY,
+            translation_placeholders={
+                "network": self.entry.title,
+                "minutes": str(round(NO_PROXY_ISSUE_AFTER / 60)),
+            },
+        )
+
+    def _check_keys(self) -> None:
+        """Nothing decrypted since connecting (no status, no beacon): the keys are wrong."""
+        issue_id = f"{ISSUE_KEYS_REJECTED}_{self.entry.entry_id}"
+        if self._heard:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_KEYS_REJECTED,
+            translation_placeholders={"network": self.entry.title},
+        )
+
+    # mesh traffic
+
+    @callback
+    def _on_message(self, message: AccessMessage) -> None:
+        self._heard = True
+        record = self.record_for(message.src)
+        if record is None:
+            return
+        if is_vendor_opcode(message.opcode):
+            if Quirk.IGNORE_VENDOR_OPCODES not in record.quirks:
+                _LOGGER.debug("Vendor opcode 0x%06X from %s", message.opcode, record.title)
+            return
+        record.last_seen = dt_util.utcnow()
+        record.failures = 0
+        record.available = True
+        update = apply_status(record.state, message)
+        self._notify(record.subentry_id)
+        if update is not None and update.remaining_ms:
+            self._schedule_follow_up(record, update.remaining_ms / 1000 + FOLLOW_UP_MARGIN)
+
+    @callback
+    def _on_beacon(self, beacon: SecureBeacon, outcome: BeaconOutcome) -> None:
+        self._heard = True
+        issue_id = f"{ISSUE_IV_INDEX_JUMP}_{self.entry.entry_id}"
+        if outcome is BeaconOutcome.TOO_FAR:
+            _LOGGER.warning(
+                "%s: beacon IV index %d is more than one step past ours (%d); not applied",
+                self.entry.title,
+                beacon.iv_index,
+                self.network.iv_index,
+            )
+            self.pending_iv_jump = beacon
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.ERROR,
+                data={"entry_id": self.entry.entry_id},
+                translation_key=ISSUE_IV_INDEX_JUMP,
+                translation_placeholders={
+                    "network": self.entry.title,
+                    "ours": str(self.network.iv_index),
+                    "theirs": str(beacon.iv_index),
+                },
+            )
+        elif outcome is BeaconOutcome.UPDATED:
+            _LOGGER.info("%s: IV index now %d", self.entry.title, self.network.iv_index)
+            self.pending_iv_jump = None
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+
+    @callback
+    def _schedule_follow_up(self, record: NodeRecord, delay: float) -> None:
+        if (cancel := self._follow_ups.pop(record.subentry_id, None)) is not None:
+            cancel()
+
+        @callback
+        def _due(_now: datetime) -> None:
+            self._follow_ups.pop(record.subentry_id, None)
+            if (link := self.manager.link) is not None:
+                self._spawn(self._async_refresh(link, record), "aoi_sig_mesh follow-up")
+
+        self._follow_ups[record.subentry_id] = async_call_later(self.hass, delay, _due)
+
+    # configuration and polling
+
+    async def _async_configure(self, link: ProxyLink, record: NodeRecord) -> None:
+        node = replace(record.node, models=dict(record.node.models))
+        before = capabilities(node)
+        publish = bool(self.entry.options.get(CONF_PUBLISH_SETUP, DEFAULT_PUBLISH_SETUP))
+        try:
+            async with asyncio.timeout(CONFIGURE_TIMEOUT):
+                result = await configure_node(link, self.network, node, publish=publish)
+        except (ConfigureError, TimeoutError, SeqNotSaved) as err:
+            _LOGGER.warning(
+                "%s: setup on the mesh failed, retrying next connect: %s", record.title, err
+            )
+            return
+        finally:
+            self.manager.touch()  # a long setup must not count as idle time
+        _LOGGER.info(
+            "%s: bound %s, publishing %s, %d-%d K",
+            record.title,
+            ", ".join(result.bound) or "nothing",
+            ", ".join(result.published) or "nothing",
+            node.kelvin_min,
+            node.kelvin_max,
+        )
+        record.node = node
+        record.configured = True
+        record.quirks = quirks_for(node.cid, node.pid)
+        if capabilities(node) != before:
+            _LOGGER.info("%s: Composition changed its capabilities", record.title)
+            record.role = default_role(node)
+        subentry = self.entry.subentries[record.subentry_id]
+        self.hass.config_entries.async_update_subentry(
+            self.entry,
+            subentry,
+            data={**subentry.data, **node.to_dict(), CONF_CONFIGURED: True, CONF_ROLE: record.role},
+        )
+
+    async def _async_refresh_all(self, link: ProxyLink) -> None:
+        for index, record in enumerate(list(self.nodes.values())):
+            if index:
+                await asyncio.sleep(REFRESH_STAGGER)
+            if not link.is_connected:
+                return
+            await self._async_refresh(link, record)
+
+    async def _async_refresh(self, link: ProxyLink, record: NodeRecord) -> None:
+        try:
+            await NodeCommands(link, record.node, record.quirks, self._tids).refresh()
+        except (LinkClosedError, SeqNotSaved) as err:
+            _LOGGER.debug("%s: refresh skipped: %s", record.title, err)
+        except MeshTimeout:
+            self._failed(record)
+        finally:
+            self.manager.touch()  # only get_link() counts as activity: a long read is too
+
+    async def _async_poll(self, _now: datetime) -> None:
+        if (link := self.manager.link) is not None:
+            self._spawn(self._async_refresh_all(link), "aoi_sig_mesh poll")
+
+    @callback
+    def _failed(self, record: NodeRecord) -> None:
+        record.failures += 1
+        if record.failures >= FAILURES_UNAVAILABLE and record.available:
+            _LOGGER.info("%s: %d requests unanswered; unavailable", record.title, record.failures)
+            record.available = False
+            self._notify(record.subentry_id)
+
+    # signal strength
+
+    @callback
+    def _on_advert(self, candidate: ProxyCandidate) -> None:
+        if candidate.address == self.proxy_address and candidate.rssi is not None:
+            self.rssi, self.rssi_seen = candidate.rssi, candidate.seen
+            self._notify(None)
+
+    @callback
+    def _update_rssi(self) -> None:
+        """HA's newest advert from the proxy; keep the last value when it has none."""
+        if self.proxy_address is None:
+            return
+        seen = self.radio.last_seen(self.proxy_address)
+        if (
+            seen is not None
+            and seen.rssi is not None
+            and (self.rssi_seen is None or seen.seen >= self.rssi_seen)
+        ):
+            self.rssi, self.rssi_seen = seen.rssi, seen.seen
+
+    @callback
+    def _rssi_tick(self, _now: datetime) -> None:
+        self._update_rssi()
+        self._notify(None)
