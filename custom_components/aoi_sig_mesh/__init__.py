@@ -5,12 +5,14 @@ from __future__ import annotations
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
 from .coordinator import MeshCoordinator
+from .entity import network_device_info
 from .radio import HaBluetoothRadio
 from .store import NetworkStore
 
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.LIGHT]
 
 type AoiConfigEntry = ConfigEntry[MeshCoordinator]
 
@@ -26,6 +28,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool:
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_on_stop))
     await coordinator.async_prime()  # the first seq block is on disk before any link starts
+    # node devices point at it with via_device, so it must exist before they are created
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id, **network_device_info(coordinator)
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     coordinator.start()
     return True
