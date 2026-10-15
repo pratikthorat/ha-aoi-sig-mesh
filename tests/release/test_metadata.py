@@ -1,0 +1,82 @@
+"""Release metadata: the manifest rules hassfest enforces for custom integrations, and hacs.json."""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+INTEGRATION = ROOT / "custom_components" / "aoi_sig_mesh"
+REPO_RE = re.compile(r"https://github\.com/([A-Za-z0-9-]+)/ha-aoi-sig-mesh")
+IOT_CLASSES = {
+    "assumed_state",
+    "calculated",
+    "cloud_polling",
+    "cloud_push",
+    "local_polling",
+    "local_push",
+}
+INTEGRATION_TYPES = {
+    "device",
+    "entity",
+    "hardware",
+    "helper",
+    "hub",
+    "service",
+    "system",
+    "virtual",
+}
+
+
+def manifest() -> dict:
+    return json.loads((INTEGRATION / "manifest.json").read_text())
+
+
+def test_manifest_keys_are_hassfest_ordered() -> None:
+    keys = list(manifest())
+    assert keys[:2] == ["domain", "name"]
+    assert keys[2:] == sorted(keys[2:])
+
+
+def test_manifest_has_the_custom_integration_fields() -> None:
+    data = manifest()
+    assert data["domain"] == "aoi_sig_mesh"
+    assert data["name"] == "AoI Bluetooth SIG Mesh"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", data["version"])
+    assert data["iot_class"] in IOT_CLASSES
+    assert data["integration_type"] in INTEGRATION_TYPES
+    assert data["config_flow"] is True
+    assert data["requirements"] == []
+    assert data["dependencies"] == ["bluetooth"]
+    assert data["documentation"].startswith("https://github.com/")
+    assert data["issue_tracker"] == data["documentation"] + "/issues"
+    assert len(data["codeowners"]) == 1
+    assert data["codeowners"][0].startswith("@")
+
+
+def test_every_owner_link_agrees() -> None:
+    data = manifest()
+    owner = REPO_RE.fullmatch(data["documentation"]).group(1)
+    assert data["codeowners"] == [f"@{owner}"]
+    for name in ("README.md", "RELEASING.md"):
+        path = ROOT / name
+        if not path.exists():
+            continue
+        found = set(REPO_RE.findall(path.read_text()))
+        assert found <= {owner}, f"{name} links to {found - {owner}}"
+
+
+def test_hacs_json() -> None:
+    data = json.loads((ROOT / "hacs.json").read_text())
+    assert data == {
+        "name": "AoI Bluetooth SIG Mesh",
+        "homeassistant": "2026.5.0",
+        "render_readme": True,
+    }
+
+
+def test_licence_keeps_the_credit() -> None:
+    text = (ROOT / "LICENSE").read_text()
+    assert text.startswith("MIT License")
+    assert "https://github.com/11z4t/tuya-ble-mesh" in text

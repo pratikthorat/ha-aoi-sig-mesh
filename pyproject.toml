@@ -10,4 +10,4 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 known-first-party = ["custom_components", "mesh", "tests"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/mesh"]
+testpaths = ["tests/mesh", "tests/release"]
