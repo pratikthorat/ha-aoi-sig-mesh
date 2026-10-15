@@ -89,6 +89,9 @@
   },
   "entity": {
     "button": {
+      "identify": {
+        "name": "Identify"
+      },
       "reconnect": {
         "name": "Reconnect"
       }

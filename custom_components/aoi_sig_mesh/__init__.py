@@ -12,7 +12,7 @@ from .entity import network_device_info
 from .radio import HaBluetoothRadio
 from .store import NetworkStore
 
-PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.LIGHT, Platform.SENSOR, Platform.SWITCH]
 
 type AoiConfigEntry = ConfigEntry[MeshCoordinator]
 

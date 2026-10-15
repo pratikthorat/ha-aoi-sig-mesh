@@ -250,11 +250,11 @@ async def test_the_listener_is_removed_on_entity_removal_and_unload(
 ) -> None:
     coordinator = bulb_entry.runtime_data
     key = first_record(bulb_entry).subentry_id
-    assert len(coordinator._listeners[key]) == 1
+    assert len(coordinator._listeners[key]) == 2  # the light and its identify button
 
     er.async_get(hass).async_remove(LAMP)
     await hass.async_block_till_done()
-    assert coordinator._listeners[key] == []
+    assert len(coordinator._listeners[key]) == 1  # only the identify button is left
 
 
 async def test_the_listener_is_removed_when_the_entry_unloads(
@@ -262,7 +262,7 @@ async def test_the_listener_is_removed_when_the_entry_unloads(
 ) -> None:
     coordinator = bulb_entry.runtime_data
     key = first_record(bulb_entry).subentry_id
-    assert len(coordinator._listeners[key]) == 1
+    assert len(coordinator._listeners[key]) == 2
 
     await hass.config_entries.async_unload(bulb_entry.entry_id)
 
