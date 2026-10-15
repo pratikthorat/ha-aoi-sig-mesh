@@ -83,6 +83,50 @@ def test_apply_status_ignores_other_and_malformed_messages():
     assert state == NodeState()
 
 
+@pytest.mark.parametrize(
+    ("opcode", "params"),
+    [
+        (OP_ONOFF_STATUS, ""),
+        (OP_ONOFF_STATUS, "0001"),
+        (OP_ONOFF_STATUS, "00010a00"),
+        (OP_CTL_STATUS, "ffffa0"),
+        (OP_CTL_STATUS, "ffffa00f00"),
+        (OP_CTL_STATUS, "ffffa00fffffa00f"),
+        (OP_CTL_TEMP_STATUS, "8c0a00"),
+        (OP_CTL_TEMP_STATUS, "8c0a000000"),
+        (OP_CTL_TEMP_STATUS, "8c0a00008c0a0000"),
+    ],
+)
+def test_apply_status_ignores_a_status_of_the_wrong_length(opcode, params):
+    state = NodeState()
+    assert apply_status(state, msg(opcode, params)) is None
+    assert state == NodeState()
+
+
+@pytest.mark.parametrize(
+    ("opcode", "params", "expected", "remaining_ms"),
+    [
+        # present off, target on, 0x05 = 5 x 100 ms
+        (OP_ONOFF_STATUS, "000105", NodeState(on=True), 500),
+        # 0x3F steps means the remaining time is unknown
+        (OP_ONOFF_STATUS, "00013f", NodeState(on=True), None),
+        (OP_ONOFF_STATUS, "01007f", NodeState(on=False), None),
+        # present 0x1000 / 2700 K, target 0x8000 / 4000 K, 0x41 = 1 x 1 s
+        (OP_CTL_STATUS, "00108c0a0080a00f41", NodeState(True, 0x8000, 4000), 1000),
+        (OP_CTL_STATUS, "00108c0a0000a00f3f", NodeState(False, None, 4000), None),
+        # present 2700 K, target 6500 K (Delta UV 0), 0x81 = 1 x 10 s
+        (OP_CTL_TEMP_STATUS, "8c0a0000641900" + "0081", NodeState(kelvin=6500), 10_000),
+        (OP_CTL_TEMP_STATUS, "8c0a0000641900" + "00ff", NodeState(kelvin=6500), None),
+    ],
+)
+def test_apply_status_reads_the_long_forms_and_prefers_the_target(
+    opcode, params, expected, remaining_ms
+):
+    state = NodeState()
+    assert apply_status(state, msg(opcode, params)) == StatusUpdate(remaining_ms)
+    assert state == expected
+
+
 def test_tid_counter_counts_up_per_destination_and_wraps():
     tids = TidCounter(start=254)
     assert [tids.next(0x00B0), tids.next(0x00B0), tids.next(0x00B0)] == [255, 0, 1]
@@ -145,6 +189,36 @@ def test_tuya_brightness_while_off_sends_onoff_first():
         assert sets(bulb) == [(0x00B0, OP_ONOFF_SET), (0x00B0, OP_LIGHTNESS_SET)]
         assert (bulb.on, bulb.lightness) == (True, 0x8000)
         assert (state.on, state.lightness) == (True, 0x8000)
+
+    run(scenario())
+
+
+def test_tuya_brightness_and_temperature_while_off_sends_onoff_first():
+    async def scenario():
+        sim = SimMesh()
+        bulb = sim.add_node("ctl", tuya_quirks=True)
+        link, state = await open_link(sim)
+        node = node_for(bulb)
+        commands = NodeCommands(link, node, quirks_for(node.cid, node.pid), TidCounter())
+        await commands.turn_on(currently_on=False, lightness=0x8000, kelvin=3000)
+        assert sets(bulb) == [(0x00B0, OP_ONOFF_SET), (0x00B0, OP_CTL_SET)]
+        assert (bulb.on, bulb.lightness, bulb.kelvin) == (True, 0x8000, 3000)
+        assert (state.on, state.lightness, state.kelvin) == (True, 0x8000, 3000)
+
+    run(scenario())
+
+
+def test_tuya_brightness_while_already_on_skips_onoff():
+    async def scenario():
+        sim = SimMesh()
+        bulb = sim.add_node("ctl", tuya_quirks=True)
+        bulb.on = True
+        link, state = await open_link(sim)
+        node = node_for(bulb)
+        commands = NodeCommands(link, node, quirks_for(node.cid, node.pid), TidCounter())
+        await commands.turn_on(currently_on=True, lightness=0x4000)
+        assert sets(bulb) == [(0x00B0, OP_LIGHTNESS_SET)]
+        assert (state.on, state.lightness) == (True, 0x4000)
 
     run(scenario())
 
@@ -291,6 +365,32 @@ def test_identify_blinks_a_light_without_health_and_restores_it():
         await asyncio.sleep(0.01)
         assert sets(bulb) == [(0x00B0, OP_ONOFF_SET_UNACK)] * 6
         assert bulb.on is True
+
+    run(scenario())
+
+
+def test_identify_cancelled_mid_blink_restores_the_light(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(control, "BLINK_INTERVAL", 5.0)
+        sim = SimMesh()
+        bulb = sim.add_node("ctl")
+        bulb.on = True
+        link, _ = await open_link(sim)
+        node = node_for(bulb)
+        node.models.pop("health")
+        commands = NodeCommands(link, node, Quirk.NONE, TidCounter())
+        task = asyncio.ensure_future(commands.identify(currently_on=True))
+        async with asyncio.timeout(1.0):
+            while bulb.on:  # the first blink turned it off
+                await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        async with asyncio.timeout(1.0):
+            while not bulb.on:
+                await asyncio.sleep(0.01)
+        assert sets(bulb) == [(0x00B0, OP_ONOFF_SET_UNACK)] * 2
+        await link.close()
 
     run(scenario())
 

@@ -175,6 +175,25 @@ def test_a_node_at_the_senders_own_address_is_skipped():
     assert result.address == 0x7F01  # past the node's one element
 
 
+@pytest.mark.parametrize("elements", [17, 0x7000])
+def test_a_declared_element_count_past_the_bound_is_refused(elements):
+    """A huge count would reserve a big range and could crowd out our provisioner address."""
+    with pytest.raises(TuyaImportError) as err:
+        import_tuya_entry("x", _sig(elements=elements))
+    assert err.value.reason == "bad_address"
+
+
+def test_a_declared_element_count_at_the_bound_is_accepted():
+    assert import_tuya_entry("x", _sig(elements=16)).node.element_count == 16
+
+
+def test_a_multi_element_node_at_the_senders_own_address_is_skipped():
+    data = _sig(elements=2, onoff=0x7F00, lightness=0x7F00, ctl=0x7F00, ctl_temp=0x7F01)
+    result = import_tuya_entry("x", {**data, "unicast_target": "7F00"})
+    assert (result.node.unicast, result.node.element_count) == (0x7F00, 2)
+    assert result.address == 0x7F02  # past both of the node's elements
+
+
 def test_the_source_mapping_is_not_changed():
     before = copy.deepcopy(TUYA_DATA)
     import_tuya_entry("x", TUYA_DATA)

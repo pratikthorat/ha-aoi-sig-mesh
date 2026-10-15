@@ -111,7 +111,7 @@ class MeshNetwork:
     def mark_persisted(self, state: dict[str, Any]) -> None:
         """Confirm that ``state`` (exactly as given to ``on_persist``) is now on disk.
 
-        If a save fails, call prime() and save again.
+        If a save fails, call prime() again; it re-persists the state.
         """
         tx_iv_index = _tx_iv_index(int(state["iv_index"]), bool(state["iv_update"]))
         self._mark_durable(tx_iv_index, int(state["seq"]))
@@ -131,7 +131,7 @@ class MeshNetwork:
 
         With an async store, await the save and ``mark_persisted`` before starting a link,
         so the first message after a restart is not refused. If a save fails, call prime()
-        and save again.
+        again; it re-persists the state.
         """
         self._reserve(min(max(self._ceiling, self._seq + SEQ_BLOCK), SEQ_MAX + 1))
 
@@ -210,8 +210,12 @@ class MeshNetwork:
         return self._iv_index - 1 if self._iv_index > 0 else None
 
     def _reset_seq(self) -> None:
+        """Restart seq on a new transmit IV index, reserving the first block.
+
+        The caller persists right after, so one confirmed save covers the first sends.
+        """
         self._seq = 0
-        self._ceiling = 0
+        self._ceiling = SEQ_BLOCK
 
     def apply_beacon(self, beacon: SecureBeacon) -> BeaconOutcome:
         """Apply a verified Secure Network Beacon (IV Update procedure).
@@ -233,7 +237,6 @@ class MeshNetwork:
         new_tx = self.tx_iv_index
         if new_tx > old_tx:  # a transmit IV index we have never used starts from seq 0
             self._reset_seq()
-            self._ceiling = SEQ_BLOCK  # one confirmed save covers the first sends
         self._persist()
         return BeaconOutcome.UPDATED
 
@@ -256,7 +259,6 @@ class MeshNetwork:
         self._iv_index = beacon.iv_index
         self._iv_update = beacon.iv_update
         self._reset_seq()
-        self._ceiling = SEQ_BLOCK  # one confirmed save covers the first sends
         self._persist()
 
 

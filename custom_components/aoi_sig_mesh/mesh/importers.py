@@ -28,7 +28,8 @@ PROVISIONER_LOW = 0x7F00
 PROVISIONER_HIGH = UNICAST_MAX
 NODE_RANGE_LOW = 0x0002
 NODE_RANGE_HIGH = 0x7EFF
-# A node's role addresses must lie within this many elements of its unicast address.
+# A node's declared element count, and its role addresses' offset from its unicast address,
+# must stay within this many elements.
 MAX_IMPORT_ELEMENTS = 16
 IV_INDEX_MAX = 0xFFFFFFFF
 _MAC_SEPARATED = re.compile(r"[0-9A-F]{2}([:-])(?:[0-9A-F]{2}\1){4}[0-9A-F]{2}", re.IGNORECASE)
@@ -152,6 +153,12 @@ def import_tuya_entry(
         elements = int(sig.get("elements", 1))
     except (TypeError, ValueError):
         elements = 1
+    if elements > MAX_IMPORT_ELEMENTS:
+        # A huge count would reserve a big range around the node, which could leave no
+        # provisioner address free.
+        raise TuyaImportError(
+            "bad_address", f"{elements} elements is more than {MAX_IMPORT_ELEMENTS}"
+        )
     models: dict[str, int] = {}
     for role in (ROLE_ONOFF, ROLE_LIGHTNESS, ROLE_CTL, ROLE_CTL_TEMP):
         if role in sig:

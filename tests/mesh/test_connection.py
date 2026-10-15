@@ -352,19 +352,29 @@ def test_a_flapping_link_backs_off():
     run(scenario())
 
 
-def test_a_link_that_held_resets_the_backoff(monkeypatch):
+def test_a_link_that_held_resets_the_backoff():
     async def scenario():
-        monkeypatch.setattr(connection, "BACKOFF_MAX", 0.1)
-        h = Harness()
+        loop = asyncio.get_running_loop()
+        times = []
+
+        async def flap_four_times(link, candidate):
+            times.append(loop.time())
+            if len(times) <= 4:
+                h.radio.transports[-1].drop()
+
+        h = Harness(on_connected=flap_four_times)
         h.radio.advertise()
         h.manager.start()
-        await h.until(lambda: h.manager.link is not None)
-        await asyncio.sleep(0.15)  # up for longer than BACKOFF_MAX
-        h.radio.transports[0].drop()
-        await h.until(lambda: len(h.connected) == 2)
+        await h.until(lambda: len(times) == 5)  # waits of 0.05, 0.1, 0.2 and 0.4 s
+        assert times[4] - times[3] >= 0.3  # the flapping raised the backoff to BACKOFF_MAX
+        await asyncio.sleep(0.45)  # this link stays up for longer than BACKOFF_MAX
+        dropped = loop.time()
+        h.radio.transports[-1].drop()
+        await h.until(lambda: len(times) == 6)
+        assert times[5] - dropped < 0.25  # BACKOFF_MIN again, not BACKOFF_MAX
         await h.manager.stop()
 
-    run(scenario())
+    run(scenario(), timeout=10)
 
 
 def test_stop_leaves_no_tasks_behind():
@@ -441,6 +451,72 @@ def test_reconnect_while_connecting_is_not_lost():
         await h.until(lambda: len(h.connected) == 2)
         await h.until(lambda: h.manager.link is not None)
         assert h.manager._skip_delay is False
+        await h.manager.stop()
+
+    run(scenario())
+
+
+def test_stop_re_raises_a_cancel_aimed_at_its_caller():
+    async def scenario():
+        h = Harness()
+        h.radio.advertise()
+        h.manager.start()
+        await h.until(lambda: h.manager.link is not None)
+        first = h.radio.transports[0]
+        closing = asyncio.Event()
+
+        async def slow_close():
+            closing.set()
+            await asyncio.sleep(0.2)
+
+        first.close = slow_close
+        stopper = asyncio.ensure_future(h.manager.stop())
+        await closing.wait()  # stop() is now awaiting the loop's teardown
+        stopper.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopper
+        assert stopper.cancelled()
+
+    run(scenario())
+
+
+def test_stop_swallows_only_its_own_cancel_of_the_loop():
+    async def scenario():
+        h = Harness()
+        h.radio.advertise()
+        h.manager.start()
+        await h.until(lambda: h.manager.link is not None)
+        await h.manager.stop()  # returns: the loop's CancelledError is stop()'s own
+        assert asyncio.current_task().cancelling() == 0
+
+    run(scenario())
+
+
+def test_a_wake_during_a_failed_connect_is_not_lost(monkeypatch):
+    """A new proxy that shows up while a connect is failing must not wait out the backoff."""
+
+    async def scenario():
+        monkeypatch.setattr(connection, "BACKOFF_MIN", 30.0)
+        h = Harness()
+        h.radio.advertise("AA:00:00:00:00:01")
+        connect = h.radio.connect
+        attempt = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def gated_connect(address):
+            if address == "AA:00:00:00:00:01":
+                attempt.set()
+                await gate.wait()
+                raise OSError("out of range")
+            return await connect(address)
+
+        h.radio.connect = gated_connect
+        h.manager.start()
+        await attempt.wait()
+        h.radio.advertise(BULB_MAC)  # a proxy not tried this round: wakes the loop
+        gate.set()
+        await h.until(lambda: h.manager.link is not None, timeout=1.0)
+        assert h.manager.proxy.address == BULB_MAC
         await h.manager.stop()
 
     run(scenario())

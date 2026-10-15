@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 import time
 from collections.abc import Callable
@@ -97,6 +98,10 @@ class TidCounter:
 
     A node treats a repeated src+dst+TID within 6 s as a retransmission and does not apply it
     again, so a TID is never handed out twice to one destination inside that window.
+
+    The counters live in memory and start at a random TID. A restart within 6 s of the last
+    command therefore has a ~1/256 chance of reusing that TID, which accepts the risk: a Home
+    Assistant restart takes longer than 6 s.
     """
 
     def __init__(
@@ -229,7 +234,14 @@ class NodeCommands:
             raise ValueError("identify needs Health Attention on a plug")
         address = self._address(ROLE_ONOFF)
         on = currently_on
-        for _ in range(BLINKS * 2):
-            on = not on
-            await self._link.send(address, onoff_set(on, self._tids.next(address), ack=False))
-            await asyncio.sleep(BLINK_INTERVAL)
+        try:
+            for _ in range(BLINKS * 2):
+                on = not on
+                await self._link.send(address, onoff_set(on, self._tids.next(address), ack=False))
+                await asyncio.sleep(BLINK_INTERVAL)
+        finally:
+            if on != currently_on:  # cut short mid-blink: put the light back as it was
+                # Best effort: the cancel or error that got us here is what the caller sees.
+                with contextlib.suppress(Exception):
+                    tid = self._tids.next(address)
+                    await self._link.send(address, onoff_set(currently_on, tid, ack=False))

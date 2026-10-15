@@ -124,7 +124,9 @@ class ConnectionManager:
             try:
                 await task
             except asyncio.CancelledError:
-                pass
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise  # a cancel aimed at our caller, not the loop's own
             except Exception:
                 _LOGGER.exception("Mesh connection loop had failed")
 
@@ -195,6 +197,9 @@ class ConnectionManager:
         self._idle = False
         self._skip_delay = False
         self._reconnect_pending = False
+        # Cleared here, not when the sleep starts, so a wake that comes while we connect
+        # (a new proxy, a demand) cuts the next sleep short instead of being lost.
+        self._wake.clear()
         link = candidate = None
         self._connecting = True
         try:
@@ -223,7 +228,6 @@ class ConnectionManager:
 
     async def _sleep(self, delay: float) -> None:
         """Sleep, unless an advert from a new proxy (or reconnect/demand) wakes us."""
-        self._wake.clear()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._wake.wait(), delay)
         self._wake.clear()

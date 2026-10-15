@@ -52,6 +52,30 @@ def test_with_an_async_store_the_jump_waits_for_its_save():
     assert net.next_seq() == 0
 
 
+def test_a_stale_pre_jump_confirmation_does_not_unlock_seqs_after_the_jump():
+    net, saved = network(durable=False, iv_index=2, seq=500)
+    net.prime()
+    stale = saved[-1]  # (2, Normal, ceiling 564): still in flight when the user confirms
+    net.accept_iv_jump(beacon(9))
+
+    net.mark_persisted(stale)  # a higher ceiling, but at the old transmit IV index
+
+    with pytest.raises(SeqNotSaved):
+        net.next_seq()
+    net.mark_persisted(saved[-1])
+    assert net.next_seq() == 0
+
+
+def test_a_jump_to_an_in_progress_target_transmits_with_the_previous_iv_index():
+    net, saved = network(iv_index=2, seq=500)
+
+    net.accept_iv_jump(beacon(9, iv_update=True))
+
+    assert net.tx_iv_index == 8
+    assert (saved[-1]["iv_index"], saved[-1]["iv_update"], saved[-1]["seq"]) == (9, True, 64)
+    assert net.next_seq() == 0
+
+
 def test_one_confirmed_save_covers_the_first_sends_after_an_iv_update():
     net, saved = network(durable=False, iv_index=3, seq=900)
     assert net.apply_beacon(beacon(4)) is BeaconOutcome.UPDATED
