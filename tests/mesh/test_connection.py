@@ -210,6 +210,26 @@ def test_a_tried_proxys_adverts_wake_the_loop_at_most_once_per_backoff_min(monke
     run(scenario())
 
 
+def test_each_failed_round_is_reported_and_a_failing_report_is_survived():
+    async def scenario():
+        h = Harness()
+        failures = []
+
+        def on_connect_failed():
+            failures.append(len(h.radio.connects))
+            raise RuntimeError("handler bug")
+
+        h.manager._on_connect_failed = on_connect_failed
+        h.radio.advertise()
+        h.radio.fail_connects = 2
+        h.manager.start()
+        await h.until(lambda: h.manager.link is not None)
+        assert failures == [1, 2]  # not after the round that connected
+        await h.manager.stop()
+
+    run(scenario())
+
+
 def test_a_new_proxy_wakes_a_sleeping_loop(monkeypatch):
     async def scenario():
         monkeypatch.setattr(connection, "BACKOFF_MIN", 30.0)

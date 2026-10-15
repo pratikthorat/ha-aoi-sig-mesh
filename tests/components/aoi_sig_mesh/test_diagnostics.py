@@ -19,12 +19,15 @@ REDACTED = "**REDACTED**"
 
 
 def _assert_no_keys(result: dict[str, Any], bulb: SimNode) -> None:
+    """Scans the whole result: no key in any form, and not the bulb's MAC anywhere."""
     dumped = json.dumps(result, default=str)
     for key in (NET_KEY, APP_KEY, bulb.dev_key):
         assert key.hex() not in dumped
         assert key.hex().upper() not in dumped
         assert json.dumps(list(key))[1:-1] not in dumped  # as a list of byte values
         assert base64.b64encode(key).decode() not in dumped
+    for mac in (BULB_MAC, BULB_MAC.replace(":", "")):
+        assert mac.lower() not in dumped.lower()  # a device identifier (HA convention)
 
 
 async def test_diagnostics_redact_every_key(
@@ -39,9 +42,9 @@ async def test_diagnostics_redact_every_key(
     assert result["entry"]["data"][CONF_APP_KEY] == REDACTED
     subentry = result["entry"]["subentries"][0]
     assert subentry["data"]["dev_key"] == REDACTED
-    assert subentry["data"]["mac"] == REDACTED  # a device identifier (HA convention)
-    assert BULB_MAC.lower() not in json.dumps(result["entry"]).lower()
+    assert subentry["data"]["mac"] == REDACTED
     assert result["connection"]["connected"] is True
+    assert result["connection"]["proxy"] == REDACTED  # the bulb is the proxy here
     assert result["nodes"]["Desk lamp"]["unicast"] == "0x00B0"
     assert result["network"]["state"]["seq"] > 0
     assert result["network"]["replay_drops"] == {"0x00B0": 1}

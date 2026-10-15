@@ -9,12 +9,13 @@ from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.aoi_sig_mesh import coordinator as coordinator_module
-from custom_components.aoi_sig_mesh.const import DOMAIN
+from custom_components.aoi_sig_mesh.const import CONF_IDLE_TIMEOUT, CONF_PUBLISH_SETUP, DOMAIN
 from custom_components.aoi_sig_mesh.coordinator import POLL_INTERVAL, MeshCoordinator
 from custom_components.aoi_sig_mesh.mesh.models import (
     OP_CTL_TEMP_STATUS,
@@ -23,7 +24,7 @@ from custom_components.aoi_sig_mesh.mesh.models import (
     encode_opcode,
 )
 from tests.sim.mesh_sim import CLIENT, SimMesh, SimNode
-from tests.sim.sim_radio import SimRadio
+from tests.sim.sim_radio import BULB_MAC, SimRadio
 
 from .conftest import make_entry, node_data, setup_entry, until
 
@@ -171,3 +172,37 @@ async def test_a_poll_is_skipped_while_the_last_round_still_runs(
         await hass.async_block_till_done(wait_background_tasks=True)
 
     assert len(calls) == 1
+
+
+async def test_with_an_idle_timeout_a_failed_connect_on_demand_makes_nodes_unavailable(
+    hass: HomeAssistant, bulb: SimNode, radio: SimRadio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Idle is not trouble, but a proxy that is gone when a command needs it is."""
+    monkeypatch.setattr(coordinator_module, "LINK_DOWN_GRACE", 0.1)
+    monkeypatch.setattr(coordinator_module, "NO_PROXY_ISSUE_AFTER", 0.3)
+    monkeypatch.setattr(coordinator_module, "COMMAND_CONNECT_TIMEOUT", 0.3)
+    radio.advertise()
+    options = {CONF_IDLE_TIMEOUT: 0.005, CONF_PUBLISH_SETUP: True}  # 0.3 s
+    coordinator = await setup_entry(
+        hass, make_entry(("Desk lamp", node_data(bulb)), options=options)
+    )
+    record = next(iter(coordinator.nodes.values()))
+    issue_id = f"no_proxy_{coordinator.entry.entry_id}"
+    registry = ir.async_get(hass)
+    try:
+        await until(lambda: record.last_seen is not None and coordinator.manager.idle)
+        # The timers the idle disconnect started have run out without any harm.
+        await until(lambda: coordinator._link_down_timer is coordinator._no_proxy_timer is None)
+        assert record.available
+        assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+        radio.unreachable.add(BULB_MAC)  # the proxy lost power while we were idle
+        with pytest.raises(HomeAssistantError):
+            await hass.services.async_call(
+                "light", "turn_on", {"entity_id": "light.desk_lamp"}, blocking=True
+            )
+
+        await until(lambda: not record.available)
+        await until(lambda: registry.async_get_issue(DOMAIN, issue_id) is not None)
+    finally:
+        await hass.config_entries.async_unload(coordinator.entry.entry_id)

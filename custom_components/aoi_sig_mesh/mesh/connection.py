@@ -64,6 +64,7 @@ class ConnectionManager:
         on_disconnected: Callable[[], None],
         on_message: Callable[[AccessMessage], None] | None = None,
         on_beacon: Callable[[SecureBeacon, BeaconOutcome], None] | None = None,
+        on_connect_failed: Callable[[], None] | None = None,
         use_filter: bool = True,
         idle_timeout: float = 0.0,
     ) -> None:
@@ -75,6 +76,7 @@ class ConnectionManager:
         self._on_disconnected = on_disconnected
         self._on_message = on_message
         self._on_beacon = on_beacon
+        self._on_connect_failed = on_connect_failed
         self._use_filter = use_filter
         self._idle_timeout = idle_timeout
         self._link: ProxyLink | None = None
@@ -218,6 +220,11 @@ class ConnectionManager:
             self._connecting = False
         if link is None or candidate is None:
             self._failed_at = time.monotonic()
+            if self._on_connect_failed is not None:
+                try:
+                    self._on_connect_failed()
+                except Exception:
+                    _LOGGER.exception("Mesh connect-failed handler failed")
             await self._sleep(backoff)
             return min(backoff * 2, BACKOFF_MAX)
         started = loop.time()

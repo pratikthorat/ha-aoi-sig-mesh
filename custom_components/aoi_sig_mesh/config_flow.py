@@ -399,8 +399,9 @@ class NodeSubentryFlow(ConfigSubentryFlow):
                 subentry,
                 data_updates={CONF_ROLE: user_input[CONF_ROLE]},
             )
-        # a stored role that is not light or switch (damaged data) must not become the default
-        role = node_role(subentry.data, read_node(subentry.data))
+        # A stored role that is not light or switch (damaged data) must not become the default:
+        # read the node with the role cleared, so the default is what the node is.
+        role = node_role(subentry.data, read_node({**subentry.data, CONF_ROLE: None}))
         schema = vol.Schema(
             {
                 vol.Required(CONF_ROLE, default=role): SelectSelector(

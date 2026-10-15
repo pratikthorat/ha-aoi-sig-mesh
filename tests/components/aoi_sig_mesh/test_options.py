@@ -292,8 +292,10 @@ async def _form_default_role(hass: HomeAssistant, entry: Any, subentry_id: str) 
 @pytest.mark.parametrize(
     ("kind", "stored", "expected"),
     [
-        ("ctl", "fan", "light"),  # unreadable node: light
+        ("ctl", "fan", "light"),  # a damaged role: what the node is
         ("ctl", 7, "light"),
+        ("onoff", "fan", "switch"),
+        ("onoff", 7, "switch"),
         ("onoff", None, "switch"),  # an explicit None is missing: what the node is
         ("ctl", None, "light"),
         ("ctl", "switch", "switch"),  # a valid stored role is kept

@@ -235,6 +235,7 @@ class MeshCoordinator:
             on_disconnected=self._on_disconnected,
             on_message=self._on_message,
             on_beacon=self._on_beacon,
+            on_connect_failed=self._on_connect_failed,
             idle_timeout=idle_minutes * 60,
         )
         # Kept across reloads of this entry, so a reload never restarts the TIDs (dropped in
@@ -496,6 +497,19 @@ class MeshCoordinator:
         self._heard = False
         self._notify(None)
         if not self._stopping:
+            self._link_down()
+
+    @callback
+    def _on_connect_failed(self) -> None:
+        """A connect round found no proxy. Not idle by then: a command or start-up wanted one.
+
+        With an idle timeout the timers the idle disconnect started have long run out (doing
+        nothing, as we were idle), so start them again; a running pair is left alone, so the
+        repair issue is not pushed back by every retry.
+        """
+        if self._stopping or self.manager.idle:
+            return
+        if self._link_down_timer is None and self._no_proxy_timer is None:
             self._link_down()
 
     @callback

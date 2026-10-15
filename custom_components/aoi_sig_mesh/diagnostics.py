@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.diagnostics import async_redact_data
+from homeassistant.components.diagnostics import REDACTED, async_redact_data
 from homeassistant.core import HomeAssistant
 
 from . import AoiConfigEntry
@@ -32,7 +32,7 @@ async def async_get_config_entry_diagnostics(
         "connection": {
             "connected": coordinator.connected,
             "idle": coordinator.manager.idle,
-            "proxy": None if proxy is None else proxy.address,
+            "proxy": None if proxy is None else REDACTED,  # the proxy is a node: its MAC too
             "rssi": coordinator.rssi,
             "rssi_age": coordinator.rssi_age,
         },
