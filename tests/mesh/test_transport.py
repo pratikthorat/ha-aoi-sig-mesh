@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from mesh.errors import MalformedPDUError
+from mesh.pdu import NetworkKeys, decrypt_network_pdu, encrypt_network_pdu
 from mesh.transport import (
     SEGMENT_SIZE,
     LowerAccess,
@@ -323,3 +324,36 @@ def test_single_segment_message():
     done = rx.add(0x00B0, net_seq, only, iv_index=0)
     assert done.message == Reassembled(100, 1, 0x26, 0, bytes(10), 0)
     assert (done.block_ack, done.send_ack) == (0b1, True)
+
+
+def test_mesh_profile_sample_message_6():
+    """Mesh Profile 1.0.1, 8.3.6 Message #6: Config AppKey Add with the DevKey, segmented."""
+    net_key = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
+    seq, src, dst = 0x3129AB, 0x0003, 0x1201
+    access = bytes.fromhex("0056341263964771734fbd76e3b40519d1d94a48")
+    upper = encrypt_upper(
+        DEV_KEY, akf=0, szmic=0, seq=seq, src=src, dst=dst, iv_index=IV, access_payload=access
+    )
+    assert upper == bytes.fromhex("ee9dddfd2169326d23f3afdfcfdc18c52fdef772e0e17308")
+    segments = segmented_access(upper, akf=0, aid=0, szmic=0, seq_zero=seq & 0x1FFF)
+    assert segments == [
+        bytes.fromhex("8026ac01ee9dddfd2169326d23f3afdf"),
+        bytes.fromhex("8026ac21cfdc18c52fdef772e0e17308"),
+    ]
+    keys = NetworkKeys.from_net_key(net_key)
+    expected = [
+        bytes.fromhex("68cab5c5348a230afba8c63d4e686364979deaf4fd40961145939cda0e"),
+        bytes.fromhex("681615b5dd4a846cae0c032bf0746f44f1b8cc8ce5edc57e55beed49c0"),
+    ]
+    for seg_o, (segment, network_pdu) in enumerate(zip(segments, expected, strict=True)):
+        fields = {"ctl": 0, "ttl": 4, "seq": seq + seg_o, "src": src, "dst": dst}
+        assert (
+            encrypt_network_pdu(keys, transport_pdu=segment, iv_index=IV, **fields) == network_pdu
+        )
+        net = decrypt_network_pdu(keys, network_pdu, IV)
+        assert net is not None
+        assert net.transport_pdu == segment
+    assert (
+        decrypt_upper(DEV_KEY, akf=0, szmic=0, seq=seq, src=src, dst=dst, iv_index=IV, upper=upper)
+        == access
+    )
