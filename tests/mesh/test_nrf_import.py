@@ -237,6 +237,7 @@ def test_error_messages_never_carry_keys():
         (lambda d: d["provisioners"][0].update(allocatedUnicastRange=5), "bad_json"),
         (lambda d: d["provisioners"][0].update(allocatedUnicastRange=["0001"]), "bad_json"),
         (lambda d: d.update(networkExclusions=5), "bad_json"),
+        (lambda d: d.update(networkExclusions=[5]), "bad_json"),
         (lambda d: d.update(networkExclusions=[{"addresses": "7F81"}]), "bad_json"),
         (lambda d: d.update(networkExclusions=[{"addresses": 5}]), "bad_json"),
         (
@@ -253,3 +254,14 @@ def test_malformed_shapes_raise_typed_errors(change, reason):
     with pytest.raises(NrfImportError) as caught:
         load(data)
     assert caught.value.reason == reason
+
+
+@pytest.mark.parametrize("name", [5, 1.5, ["x"], {"a": 1}, None, True, "  "])
+def test_a_non_string_or_blank_name_falls_back_to_a_default_str_title(name):
+    data = export()
+    data["meshName"] = name
+    data["nodes"][1]["name"] = name
+    result = load(data)
+    assert result.title == "nRF Mesh network"
+    assert all(isinstance(node.title, str) and node.title for node in result.nodes)
+    assert any(node.title.startswith("Node 0x") for node in result.nodes)
