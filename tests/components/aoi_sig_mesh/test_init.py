@@ -24,7 +24,7 @@ from custom_components.aoi_sig_mesh.coordinator import (
 )
 from custom_components.aoi_sig_mesh.mesh.config import OP_MODEL_APP_BIND
 from custom_components.aoi_sig_mesh.mesh.configure import ConfigureError
-from custom_components.aoi_sig_mesh.mesh.errors import SeqNotSaved
+from custom_components.aoi_sig_mesh.mesh.errors import LinkClosedError, SeqNotSaved
 from custom_components.aoi_sig_mesh.mesh.models import encode_opcode, parse_opcode
 from custom_components.aoi_sig_mesh.store import NetworkStore
 from tests.sim.mesh_sim import CLIENT, SimMesh, SimNode
@@ -532,3 +532,33 @@ async def test_the_idle_timer_restarts_after_each_setup_and_read(
 
     start = events.index("configure done")
     assert events[start:] == ["configure done", "touch", "refresh done", "touch"]
+
+
+async def test_tids_continue_across_a_reload(
+    hass: HomeAssistant, bulb: SimNode, bulb_entry: Any
+) -> None:
+    """A reload inside 6 s of a command must not hand the bulb that command's TID again."""
+
+    async def last_tid(service: str) -> int:
+        await hass.services.async_call(
+            "light", service, {"entity_id": "light.desk_lamp"}, blocking=True
+        )
+        return bulb.tids[bulb.unicast][0]
+
+    first = await last_tid("turn_on")
+    assert await hass.config_entries.async_reload(bulb_entry.entry_id)
+    await until(lambda: bulb_entry.runtime_data.connected)
+
+    assert await last_tid("turn_off") == (first + 1) & 0xFF
+
+    await hass.config_entries.async_remove(bulb_entry.entry_id)
+    assert bulb_entry.entry_id not in hass.data.get(DOMAIN, {})  # removal drops the counters
+
+
+async def test_an_unloaded_network_sends_nothing(hass: HomeAssistant, bulb_entry: Any) -> None:
+    coordinator: MeshCoordinator = bulb_entry.runtime_data
+
+    await hass.config_entries.async_unload(bulb_entry.entry_id)
+
+    with pytest.raises(LinkClosedError):
+        coordinator.network.next_seq()

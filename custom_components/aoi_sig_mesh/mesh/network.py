@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .crypto import k4
-from .errors import MeshError, SeqNotSaved
+from .errors import LinkClosedError, MeshError, SeqNotSaved
 from .pdu import NetworkKeys, SecureBeacon
 
 SEQ_BLOCK = 64
@@ -81,6 +81,7 @@ class MeshNetwork:
         # The highest saved (transmit IV index, seq ceiling). A restored state came from disk.
         self._durable_tx_iv = self.tx_iv_index  # (0, 0) without a state
         self._durable_ceiling = self._ceiling
+        self._closed = False
 
     def __repr__(self) -> str:
         return (
@@ -135,13 +136,23 @@ class MeshNetwork:
         """
         self._reserve(min(max(self._ceiling, self._seq + SEQ_BLOCK), SEQ_MAX + 1))
 
+    def close(self) -> None:
+        """Shut down: from now on next_seq raises LinkClosedError, so nothing is sent.
+
+        The state can still be read (and saved) afterwards.
+        """
+        self._closed = True
+
     def next_seq(self, count: int = 1) -> int:
         """Hand out ``count`` consecutive seqs.
 
         The next block is reserved and persisted once the seqs come within RESERVE_MARGIN
         of the ceiling. Raises ``SeqNotSaved`` (taking no seq) when no saved state covers
         the seqs at the current transmit IV index yet: the save is pending, so try again.
+        Raises ``LinkClosedError`` once the network is closed.
         """
+        if self._closed:
+            raise LinkClosedError("the mesh network is shut down")
         if count < 1:
             raise ValueError(f"count must be at least 1, got {count}")
         first = self._seq

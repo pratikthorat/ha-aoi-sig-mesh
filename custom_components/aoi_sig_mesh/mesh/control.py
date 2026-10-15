@@ -120,9 +120,10 @@ class TidCounter:
     A node treats a repeated src+dst+TID within 6 s as a retransmission and does not apply it
     again, so a TID is never handed out twice to one destination inside that window.
 
-    The counters live in memory and start at a random TID. A restart within 6 s of the last
-    command therefore has a ~1/256 chance of reusing that TID, which accepts the risk: a Home
-    Assistant restart takes longer than 6 s.
+    The counters live in memory and start at a random TID. The integration keeps one counter
+    per network across reloads of its entry, so only a Home Assistant restart starts afresh:
+    within 6 s of the last command that has a ~1/256 chance of reusing its TID, an accepted
+    risk, since a restart takes longer than 6 s.
     """
 
     def __init__(

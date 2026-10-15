@@ -237,7 +237,11 @@ class MeshCoordinator:
             on_beacon=self._on_beacon,
             idle_timeout=idle_minutes * 60,
         )
-        self._tids = TidCounter()
+        # Kept across reloads of this entry, so a reload never restarts the TIDs (dropped in
+        # async_remove_entry).
+        self._tids: TidCounter = hass.data.setdefault(DOMAIN, {}).setdefault(
+            entry.entry_id, TidCounter()
+        )
         self._listeners: dict[str | None, list[CALLBACK_TYPE]] = {}
         self._follow_ups: dict[str, CALLBACK_TYPE] = {}
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -437,6 +441,7 @@ class MeshCoordinator:
         await asyncio.shield(self._shutdown)
 
     async def _async_stop(self) -> None:
+        self.network.close()  # a straggler (a task, a late Action) can no longer send
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()

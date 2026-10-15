@@ -61,9 +61,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> None:
-    """Deleting the network deletes its state and issues; the address book keeps its addresses."""
+    """Deleting the network deletes its state, TIDs and issues; the address book keeps its own."""
     for issue in (ISSUE_IV_INDEX_JUMP, ISSUE_KEYS_REJECTED, ISSUE_NO_PROXY, ISSUE_NODE_UNREADABLE):
         ir.async_delete_issue(hass, DOMAIN, f"{issue}_{entry.entry_id}")
+    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)  # the TID counters
     await NetworkStore(hass, entry.entry_id).async_remove()
 
 

@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from mesh.errors import MeshError, SeqNotSaved
+from mesh.errors import LinkClosedError, MeshError, SeqNotSaved
 from mesh.network import RESERVE_MARGIN, SEQ_BLOCK, SEQ_MAX, BeaconOutcome, MeshNetwork
 from mesh.pdu import SecureBeacon
 
@@ -51,6 +51,19 @@ def test_seq_counts_up():
     assert net.next_seq() == 1
     assert net.next_seq(3) == 2  # reserves 2, 3, 4
     assert net.next_seq() == 5
+
+
+def test_a_closed_network_hands_out_no_seq():
+    saved = []
+    net = make(saved=saved)
+    assert net.next_seq() == 0
+    net.close()
+    with pytest.raises(LinkClosedError):
+        net.next_seq()
+    assert net.persistent_state()["seq"] == saved[-1]["seq"]  # still saved on the way out
+    net.close()  # idempotent
+    with pytest.raises(LinkClosedError):
+        net.next_seq()
 
 
 def test_seq_block_is_persisted_before_use():

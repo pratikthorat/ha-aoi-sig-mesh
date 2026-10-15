@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
@@ -83,6 +85,8 @@ class ConnectionManager:
         self._wake = asyncio.Event()
         self._demand = asyncio.Event()
         self._tried: set[str] = set()
+        self._failed_at: float | None = None  # time.monotonic() the last round failed
+        self._advert_woke_at = -math.inf  # time.monotonic() a tried proxy's advert last woke us
         self._skip_delay = False
         self._connecting = False
         self._reconnect_pending = False
@@ -200,6 +204,7 @@ class ConnectionManager:
         # Cleared here, not when the sleep starts, so a wake that comes while we connect
         # (a new proxy, a demand) cuts the next sleep short instead of being lost.
         self._wake.clear()
+        self._failed_at = None
         link = candidate = None
         self._connecting = True
         try:
@@ -212,6 +217,7 @@ class ConnectionManager:
         finally:
             self._connecting = False
         if link is None or candidate is None:
+            self._failed_at = time.monotonic()
             await self._sleep(backoff)
             return min(backoff * 2, BACKOFF_MAX)
         started = loop.time()
@@ -334,9 +340,20 @@ class ConnectionManager:
         self._closed.set()
 
     def _on_advert(self, candidate: ProxyCandidate) -> None:
-        # Only a proxy we did not try last time wakes the loop, so a storm of adverts from a
-        # proxy that keeps failing cannot defeat the backoff.
-        if self._link is not None or candidate.address in self._tried:
+        if self._link is not None or not self.matches(candidate):
             return
-        if self.matches(candidate):
+        if candidate.address not in self._tried:
+            self._wake.set()  # a proxy the last round did not try
+            return
+        # A proxy that failed and advertises again (say, the bulb is back after a wall
+        # power-cycle) is worth a retry before the backoff runs out. At most once per
+        # BACKOFF_MIN, so a storm of adverts from a proxy that keeps failing cannot defeat it.
+        failed_at = self._failed_at
+        now = time.monotonic()
+        if (
+            failed_at is not None
+            and candidate.seen > failed_at
+            and now - self._advert_woke_at >= BACKOFF_MIN
+        ):
+            self._advert_woke_at = now
             self._wake.set()
