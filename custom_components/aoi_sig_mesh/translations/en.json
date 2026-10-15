@@ -40,7 +40,9 @@
       "already_configured": "This network or device is already set up.",
       "no_import_source": "There is nothing to import: no Tuya BLE Mesh SIG Mesh entry was found.",
       "not_supported": "This Bluetooth device cannot be set up from discovery.",
-      "node_added": "The device was added to your existing network."
+      "node_added": "The device was added to your existing network.",
+      "address_conflict": "This device's old integration sent from this network's own address; importing it would be unsafe.",
+      "cannot_save": "The provisioner address could not be saved, so nothing was imported. Check the Home Assistant log for disk errors."
     }
   },
   "options": {

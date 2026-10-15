@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from types import MappingProxyType
 from typing import Any
 
 import voluptuous as vol
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import (
-    SIGNAL_CONFIG_ENTRY_CHANGED,
+    SOURCE_IGNORE,
     ConfigEntry,
-    ConfigEntryChange,
     ConfigEntryDisabler,
     ConfigFlow,
     ConfigFlowResult,
     ConfigSubentry,
+    UnknownEntry,
 )
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -49,7 +50,7 @@ from .const import (
     SUBENTRY_NODE,
     TUYA_DOMAIN,
 )
-from .coordinator import default_role
+from .coordinator import claimed_range, default_role
 from .mesh.importers import (
     NODE_RANGE_HIGH,
     NODE_RANGE_LOW,
@@ -62,6 +63,8 @@ from .mesh.pdu import NetworkKeys
 from .mesh.proxy import parse_proxy_service_data
 from .store import AddressBook
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def node_subentry_data(node_import: TuyaImport) -> dict[str, Any]:
     node = node_import.node
@@ -71,43 +74,6 @@ def node_subentry_data(node_import: TuyaImport) -> dict[str, Any]:
         CONF_MAC: node_import.mac,
         CONF_CONFIGURED: False,
     }
-
-
-# How long a pending "disable the old entry" waits for the new entry to be created.
-DISABLE_OLD_WAIT = 300.0
-
-
-def disable_when_created(hass: HomeAssistant, source_id: str, network_id: str) -> None:
-    """Disable ``source_id`` once the entry for ``network_id`` exists, not before.
-
-    A flow cannot run code after it returns ``create_entry``, so this waits for the entry
-    to be added. If creation fails the old entry is left alone.
-    """
-    done = False
-
-    @callback
-    def cleanup() -> None:
-        nonlocal done
-        if not done:
-            done = True
-            unsub()
-            timer.cancel()
-
-    @callback
-    def changed(change: ConfigEntryChange, entry: ConfigEntry) -> None:
-        if (
-            change is ConfigEntryChange.ADDED
-            and entry.domain == DOMAIN
-            and entry.unique_id == network_id
-        ):
-            cleanup()
-            hass.async_create_task(
-                hass.config_entries.async_set_disabled_by(source_id, ConfigEntryDisabler.USER),
-                f"{DOMAIN} disable old entry",
-            )
-
-    unsub = async_dispatcher_connect(hass, SIGNAL_CONFIG_ENTRY_CHANGED, changed)
-    timer = hass.loop.call_later(DISABLE_OLD_WAIT, cleanup)
 
 
 def node_unique_id(unicast: int) -> str:
@@ -122,6 +88,8 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         self._source: ConfigEntry | None = None
         self._existing: ConfigEntry | None = None
         self._name = DEFAULT_NETWORK_NAME
+        self._disable_old = False
+        self._ignored: ConfigEntry | None = None
 
     def _tuya_entries(self) -> list[ConfigEntry]:
         return [
@@ -180,23 +148,45 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(step_id="tuya_import", data_schema=schema, errors=errors)
 
+    def _network_entry(self, network_id: str) -> tuple[ConfigEntry | None, ConfigEntry | None]:
+        """(the network entry we have, an ignored discovery entry for the same ID)."""
+        found = self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, network_id)
+        if found is not None and found.source == SOURCE_IGNORE:
+            return None, found  # its data is empty; HA would replace it on create
+        return found, None
+
+    @staticmethod
+    def _join_conflict(existing: ConfigEntry, node_import: TuyaImport) -> str | None:
+        """Why ``node_import`` cannot join ``existing``, as an abort reason."""
+        own = int(existing.data[CONF_ADDRESS])
+        if node_import.old_address == own:
+            # The old integration sent from our address: same sender, same nonces.
+            return "address_conflict"
+        node = node_import.node
+        start, end = node.unicast, node.unicast + node.element_count
+        claimed = [(own, 1)]
+        for sub in existing.subentries.values():
+            if sub.subentry_type == SUBENTRY_NODE and (rng := claimed_range(sub.data)):
+                claimed.append(rng)
+        if any(start < first + count and first < end for first, count in claimed):
+            return "already_configured"
+        return None
+
     async def _async_import(self, source: ConfigEntry) -> TuyaImport | ConfigFlowResult:
         """Import ``source``; joins the network entry we already have for its NetKey."""
         probe = import_tuya_entry(source.title, source.data)
         network_id = NetworkKeys.from_net_key(probe.net_key).network_id.hex()
-        used = await AddressBook(self.hass).async_used(network_id)
-        existing = self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, network_id)
+        existing, ignored = self._network_entry(network_id)
         if existing is not None:
-            nodes = [
-                (int(sub.data["unicast"]), int(sub.data["element_count"]))
-                for sub in existing.subentries.values()
-            ]
-            if any(start <= probe.node.unicast < start + count for start, count in nodes):
-                return self.async_abort(reason="already_configured")
-            used = [*used, (int(existing.data[CONF_ADDRESS]), 1), *nodes]
+            # Joining keeps the network's own address, so the allocated one is discarded:
+            # skip the address book rather than risk a false no_address.
+            if (reason := self._join_conflict(existing, probe)) is not None:
+                return self.async_abort(reason=reason)
+            used: list[tuple[int, int]] = []
         else:
+            used = await AddressBook(self.hass).async_used(network_id)
             await self.async_set_unique_id(network_id, raise_on_progress=False)
-        self._existing = existing
+        self._existing, self._ignored = existing, ignored
         return import_tuya_entry(source.title, source.data, used_addresses=used)
 
     async def async_step_disable_old(
@@ -211,10 +201,24 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
                 description_placeholders={"old": self._source.title},
             )
         node_import = self._import
+        self._disable_old = bool(user_input[CONF_DISABLE_OLD])
         unique_id = node_unique_id(node_import.node.unicast)
-        if self._existing is not None:
+        network_id = NetworkKeys.from_net_key(node_import.net_key).network_id.hex()
+        if self.hass.config_entries.async_get_entry(self._source.entry_id) is None:
+            return self.async_abort(reason="no_import_source")
+        existing, ignored = self._network_entry(network_id)
+        if (existing is None) != (self._existing is None) or (
+            existing is not None and existing is not self._existing
+        ):
+            # The network was added or removed while the form was open.
+            return self.async_abort(
+                reason="no_import_source" if existing is None else "already_configured"
+            )
+        if existing is not None:
+            if (reason := self._join_conflict(existing, node_import)) is not None:
+                return self.async_abort(reason=reason)
             self.hass.config_entries.async_add_subentry(
-                self._existing,
+                existing,
                 ConfigSubentry(
                     data=MappingProxyType(node_subentry_data(node_import)),
                     subentry_type=SUBENTRY_NODE,
@@ -222,15 +226,17 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
                     unique_id=unique_id,
                 ),
             )
-            if user_input[CONF_DISABLE_OLD]:
-                await self.hass.config_entries.async_set_disabled_by(
-                    self._source.entry_id, ConfigEntryDisabler.USER
-                )
+            await self._async_disable_old()
             return self.async_abort(reason="node_added")
-        network_id = NetworkKeys.from_net_key(node_import.net_key).network_id.hex()
-        await AddressBook(self.hass).async_add(network_id, node_import.address)
-        if user_input[CONF_DISABLE_OLD]:
-            disable_when_created(self.hass, self._source.entry_id, network_id)
+        try:
+            await AddressBook(self.hass).async_add(network_id, node_import.address)
+        except (HomeAssistantError, OSError):
+            _LOGGER.exception("Could not save the provisioner address book")
+            return self.async_abort(reason="cannot_save")
+        if ignored is not None:
+            # HA skips async_on_create_entry when it replaces an ignored entry, so clear it
+            # ourselves; an ignored entry holds no state.
+            await self.hass.config_entries.async_remove(ignored.entry_id)
         return self.async_create_entry(
             title=self._name,
             data={
@@ -257,3 +263,17 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ],
         )
+
+    async def _async_disable_old(self) -> None:
+        """Two integrations would fight over the bulb: disable the old entry, if asked to."""
+        if not self._disable_old or self._source is None:
+            return
+        with contextlib.suppress(UnknownEntry):  # the user removed it meanwhile
+            await self.hass.config_entries.async_set_disabled_by(
+                self._source.entry_id, ConfigEntryDisabler.USER
+            )
+
+    async def async_on_create_entry(self, result: ConfigFlowResult) -> ConfigFlowResult:
+        """Runs once the network entry exists: only now is the old entry disabled."""
+        await self._async_disable_old()
+        return result

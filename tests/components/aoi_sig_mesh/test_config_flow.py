@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import MappingProxyType
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from homeassistant.config_entries import SOURCE_BLUETOOTH, SOURCE_USER, ConfigEntryDisabler
+from homeassistant.config_entries import (
+    SOURCE_BLUETOOTH,
+    SOURCE_IGNORE,
+    SOURCE_USER,
+    ConfigEntryDisabler,
+    ConfigSubentry,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.service_info.bluetooth import BluetoothServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.aoi_sig_mesh.const import DOMAIN, PROXY_SERVICE_UUID, TUYA_DOMAIN
+from custom_components.aoi_sig_mesh.store import _StrictStore
 from tests.sim.mesh_sim import APP_KEY, NET_KEY, SimNode
 
 from .conftest import NETWORK_ID, make_entry, node_data
@@ -140,6 +149,7 @@ async def test_a_second_device_joins_the_network_it_belongs_to(
         "Hall bulb",
         unicast_target="00C0",
         mac_address="dc:23:50:00:00:03",
+        unicast_our="0005",
         sig_models={"elements": 1, "onoff": 0xC0},
     )
 
@@ -157,7 +167,7 @@ async def test_a_second_device_joins_the_network_it_belongs_to(
 
 async def test_a_device_already_in_the_network_aborts(hass: HomeAssistant, bulb: SimNode) -> None:
     make_entry(("Desk lamp", node_data(bulb))).add_to_hass(hass)
-    source = tuya_entry(hass)
+    source = tuya_entry(hass, unicast_our="0005")
 
     result = await run_import(hass, source)
 
@@ -187,6 +197,206 @@ async def test_a_broken_entry_shows_why(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "tuya_import"
     assert result["errors"] == {"base": error}
+
+
+async def open_disable_old(hass: HomeAssistant, source: MockConfigEntry) -> str:
+    """Walk to the disable_old form and return the flow id."""
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "tuya_import"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"source_entry": source.entry_id, "name": "Home mesh"}
+    )
+    assert result["step_id"] == "disable_old"
+    return result["flow_id"]
+
+
+async def test_an_ignored_discovery_is_replaced_by_the_import(hass: HomeAssistant) -> None:
+    MockConfigEntry(domain=DOMAIN, source=SOURCE_IGNORE, unique_id=NETWORK_ID, data={}).add_to_hass(
+        hass
+    )
+    source = tuya_entry(hass)
+
+    result = await run_import(hass, source)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    (entry,) = hass.config_entries.async_entries(DOMAIN)
+    assert entry.data["address"] == 0x7F00
+    assert source.disabled_by is ConfigEntryDisabler.USER
+
+
+async def test_the_old_entry_is_still_enabled_while_the_new_one_is_set_up(
+    hass: HomeAssistant,
+) -> None:
+    source = tuya_entry(hass)
+    seen: list[ConfigEntryDisabler | None] = []
+
+    async def setup(hass: HomeAssistant, entry: Any) -> bool:
+        seen.append(source.disabled_by)
+        return True
+
+    with patch("custom_components.aoi_sig_mesh.async_setup_entry", side_effect=setup):
+        await run_import(hass, source)
+
+    assert seen == [None]
+    assert source.disabled_by is ConfigEntryDisabler.USER
+
+
+async def test_a_failed_creation_leaves_the_old_entry_enabled(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+    flow_id = await open_disable_old(hass, source)
+
+    with (
+        patch.object(hass.config_entries, "async_add", side_effect=HomeAssistantError),
+        pytest.raises(HomeAssistantError),
+    ):
+        await hass.config_entries.flow.async_configure(flow_id, {"disable_old": True})
+    await hass.async_block_till_done()
+
+    assert source.disabled_by is None
+    assert not hass.config_entries.async_entries(DOMAIN)
+
+
+async def test_a_join_that_aborts_at_submit_leaves_the_old_entry_enabled(
+    hass: HomeAssistant, bulb: SimNode
+) -> None:
+    existing = make_entry()
+    existing.add_to_hass(hass)
+    source = tuya_entry(hass, unicast_our="0005")
+    flow_id = await open_disable_old(hass, source)
+    # The same device arrives by another route while the form is open.
+    hass.config_entries.async_add_subentry(
+        existing,
+        ConfigSubentry(
+            data=MappingProxyType(node_data(bulb, mac=None) | {"unicast": 0xB0}),
+            subentry_type="node",
+            title="Other",
+            unique_id="00b0",
+        ),
+    )
+
+    result = await hass.config_entries.flow.async_configure(flow_id, {"disable_old": True})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert source.disabled_by is None
+
+
+async def test_unticking_disable_leaves_a_joined_source_enabled(
+    hass: HomeAssistant, bulb: SimNode
+) -> None:
+    make_entry(("Desk lamp", node_data(bulb))).add_to_hass(hass)
+    source = tuya_entry(
+        hass,
+        unicast_our="0005",
+        unicast_target="00C0",
+        sig_models={"elements": 1, "onoff": 0xC0},
+    )
+
+    result = await run_import(hass, source, disable_old=False)
+
+    assert result["reason"] == "node_added"
+    assert source.disabled_by is None
+
+
+async def test_the_network_vanishing_at_submit_aborts(hass: HomeAssistant) -> None:
+    existing = make_entry()
+    existing.add_to_hass(hass)
+    source = tuya_entry(hass, unicast_our="0005")
+    flow_id = await open_disable_old(hass, source)
+    await hass.config_entries.async_remove(existing.entry_id)
+
+    result = await hass.config_entries.flow.async_configure(flow_id, {"disable_old": True})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_import_source"
+    assert source.disabled_by is None
+
+
+async def test_a_damaged_subentry_does_not_break_a_join(hass: HomeAssistant, bulb: SimNode) -> None:
+    existing = make_entry(("Desk lamp", node_data(bulb)))
+    existing.add_to_hass(hass)
+    hass.config_entries.async_add_subentry(
+        existing,
+        ConfigSubentry(
+            data=MappingProxyType({"junk": True}),
+            subentry_type="node",
+            title="Broken",
+            unique_id="broken",
+        ),
+    )
+    source = tuya_entry(
+        hass,
+        unicast_our="0005",
+        unicast_target="00C0",
+        sig_models={"elements": 1, "onoff": 0xC0},
+    )
+
+    result = await run_import(hass, source)
+
+    assert result["reason"] == "node_added"
+    assert any(sub.unique_id == "00c0" for sub in existing.subentries.values())
+
+
+async def test_a_device_overlapping_a_claimed_range_aborts(
+    hass: HomeAssistant, bulb: SimNode
+) -> None:
+    make_entry(("Desk lamp", node_data(bulb))).add_to_hass(hass)
+    source = tuya_entry(
+        hass,
+        unicast_our="0005",
+        unicast_target="00AF",
+        sig_models={"elements": 2, "onoff": 0xAF},
+    )
+
+    result = await run_import(hass, source)
+
+    assert result["reason"] == "already_configured"
+    assert source.disabled_by is None
+
+
+async def test_a_device_containing_the_networks_own_address_aborts(hass: HomeAssistant) -> None:
+    make_entry(address=0x0003).add_to_hass(hass)
+    source = tuya_entry(
+        hass,
+        unicast_our="0005",
+        unicast_target="0002",
+        sig_models={"elements": 3, "onoff": 0x0002},
+    )
+
+    result = await run_import(hass, source)
+
+    assert result["reason"] == "already_configured"
+
+
+async def test_a_fork_that_sent_from_the_networks_own_address_is_refused(
+    hass: HomeAssistant, bulb: SimNode
+) -> None:
+    make_entry(("Desk lamp", node_data(bulb)), address=0x0005).add_to_hass(hass)
+    source = tuya_entry(
+        hass,
+        unicast_our="0005",
+        unicast_target="00C0",
+        sig_models={"elements": 1, "onoff": 0xC0},
+    )
+
+    result = await run_import(hass, source)
+
+    assert result["reason"] == "address_conflict"
+    assert source.disabled_by is None
+
+
+async def test_an_unsaved_address_book_creates_nothing(hass: HomeAssistant) -> None:
+    source = tuya_entry(hass)
+
+    with patch.object(_StrictStore, "async_save_strict", AsyncMock(side_effect=OSError("disk"))):
+        result = await run_import(hass, source)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "cannot_save"
+    assert not hass.config_entries.async_entries(DOMAIN)
+    assert source.disabled_by is None
 
 
 def proxy_advert(data: bytes) -> BluetoothServiceInfo:

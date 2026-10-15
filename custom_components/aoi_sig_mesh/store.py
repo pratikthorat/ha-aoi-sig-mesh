@@ -115,9 +115,7 @@ class AddressBook:
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
-        self._store: Store[dict[str, list[int]]] = Store(
-            hass, STORAGE_VERSION, f"{DOMAIN}.addresses", atomic_writes=True
-        )
+        self._store = _StrictStore(hass, STORAGE_VERSION, f"{DOMAIN}.addresses", atomic_writes=True)
         self._lock: asyncio.Lock = hass.data.setdefault(f"{DOMAIN}_address_lock", asyncio.Lock())
 
     async def async_used(self, network_id: str) -> list[tuple[int, int]]:
@@ -130,4 +128,4 @@ class AddressBook:
             used = set(data.get(network_id, []))
             used.add(address)
             data[network_id] = sorted(used)
-            await self._store.async_save(data)
+            await self._store.async_save_strict(data)
