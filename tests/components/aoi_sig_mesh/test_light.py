@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from typing import Any
 
 import pytest
@@ -34,7 +35,11 @@ from custom_components.aoi_sig_mesh.light import (
     brightness_to_lightness,
     lightness_to_brightness,
 )
-from custom_components.aoi_sig_mesh.mesh.models import OP_ONOFF_SET
+from custom_components.aoi_sig_mesh.mesh.models import (
+    OP_CTL_TEMP_SET,
+    OP_CTL_TEMP_SET_UNACK,
+    OP_ONOFF_SET,
+)
 from custom_components.aoi_sig_mesh.mesh.node import KELVIN_DEFAULT_MAX, KELVIN_DEFAULT_MIN
 from tests.sim.mesh_sim import SimMesh, SimNode
 from tests.sim.sim_radio import SimRadio
@@ -210,6 +215,13 @@ async def test_a_color_temperature_above_the_range_is_clamped(
 
     await turn(hass, SERVICE_TURN_ON, **{ATTR_COLOR_TEMP_KELVIN: KELVIN_DEFAULT_MAX + 2000})
 
+    # The sim clamps on receipt too, so check what the integration put on the wire.
+    sets = [
+        params
+        for _dst, opcode, params in bulb.received
+        if opcode in (OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK)
+    ]
+    assert struct.unpack_from("<H", sets[-1])[0] == KELVIN_DEFAULT_MAX
     assert bulb.kelvin == KELVIN_DEFAULT_MAX
     state = hass.states.get(LAMP)
     assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == KELVIN_DEFAULT_MAX
