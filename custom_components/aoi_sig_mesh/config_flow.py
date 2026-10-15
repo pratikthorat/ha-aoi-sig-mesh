@@ -16,10 +16,17 @@ from homeassistant.config_entries import (
     ConfigFlow,
     ConfigFlowResult,
     ConfigSubentry,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    SubentryFlowResult,
     UnknownEntry,
 )
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -47,6 +54,8 @@ from .const import (
     DEFAULT_PUBLISH_SETUP,
     DOMAIN,
     PROXY_SERVICE_UUID,
+    ROLE_LIGHT,
+    ROLE_SWITCH,
     SUBENTRY_NODE,
     TUYA_DOMAIN,
 )
@@ -62,6 +71,8 @@ from .mesh.importers import (
 from .mesh.pdu import NetworkKeys
 from .mesh.proxy import parse_proxy_service_data
 from .store import AddressBook
+
+IDLE_TIMEOUT_MAX = 240  # minutes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +101,18 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         self._name = DEFAULT_NETWORK_NAME
         self._disable_old = False
         self._ignored: ConfigEntry | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> AoiSigMeshOptionsFlow:
+        return AoiSigMeshOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        return {SUBENTRY_NODE: NodeSubentryFlow}
 
     def _tuya_entries(self) -> list[ConfigEntry]:
         return [
@@ -277,3 +300,68 @@ class AoiSigMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         """Runs once the network entry exists: only now is the old entry disabled."""
         await self._async_disable_old()
         return result
+
+
+class AoiSigMeshOptionsFlow(OptionsFlow):
+    """Saving reloads the network (the update listener sees the options changed)."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(
+                data={
+                    CONF_IDLE_TIMEOUT: int(user_input[CONF_IDLE_TIMEOUT]),
+                    CONF_PUBLISH_SETUP: user_input[CONF_PUBLISH_SETUP],
+                }
+            )
+        options = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_IDLE_TIMEOUT,
+                    default=options.get(CONF_IDLE_TIMEOUT, DEFAULT_IDLE_TIMEOUT),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0,
+                        max=IDLE_TIMEOUT_MAX,
+                        step=1,
+                        unit_of_measurement="min",
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_PUBLISH_SETUP,
+                    default=options.get(CONF_PUBLISH_SETUP, DEFAULT_PUBLISH_SETUP),
+                ): bool,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
+class NodeSubentryFlow(ConfigSubentryFlow):
+    """Nodes come from imports for now; reconfigure picks the role (light or switch)."""
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        return self.async_abort(reason="add_by_import")
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        subentry = self._get_reconfigure_subentry()
+        if user_input is not None:
+            return self.async_update_and_abort(
+                self._get_entry(),
+                subentry,
+                data_updates={CONF_ROLE: user_input[CONF_ROLE]},
+            )
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_ROLE, default=subentry.data.get(CONF_ROLE, ROLE_LIGHT)
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[ROLE_LIGHT, ROLE_SWITCH], translation_key=CONF_ROLE
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(step_id="reconfigure", data_schema=schema)

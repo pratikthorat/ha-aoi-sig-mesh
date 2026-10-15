@@ -278,7 +278,8 @@ async def test_a_setup_cut_short_by_a_drop_is_retried_on_the_next_connect(
         return real_handle(dst, access, dev_key=dev_key)
 
     radio.advertise()
-    entry = make_entry(("Desk lamp", node_data(lamp, configured=False)))
+    # capabilities as Composition reports them: the setup then records no change, no reload
+    entry = make_entry(("Desk lamp", {**node_data(lamp), CONF_CONFIGURED: False}))
     with patch.object(lamp, "handle", handle):
         coordinator = await setup_entry(hass, entry)
         record = next(iter(coordinator.nodes.values()))

@@ -213,6 +213,7 @@ class MeshCoordinator:
                 quirks=quirks_for(node.cid, node.pid),
             )
         self._report_unreadable(unreadable)
+        self._loaded = self._snapshot(entry)
         self._prune_replay(claimed)
         idle_minutes = float(entry.options.get(CONF_IDLE_TIMEOUT, DEFAULT_IDLE_TIMEOUT))
         self.manager = ConnectionManager(
@@ -240,6 +241,29 @@ class MeshCoordinator:
         self.pending_iv_jump: SecureBeacon | None = None  # a TOO_FAR beacon awaiting the user
 
     # lookups
+
+    @staticmethod
+    def _snapshot(entry: ConfigEntry) -> tuple[dict[str, Any], dict[str, tuple[Any, ...]]]:
+        """What entities and connection settings are built from: options, roles, capabilities."""
+        nodes: dict[str, tuple[Any, ...]] = {}
+        for subentry_id, subentry in entry.subentries.items():
+            if subentry.subentry_type != SUBENTRY_NODE:
+                continue
+            node = read_node(subentry.data)
+            nodes[subentry_id] = (
+                (subentry.data.get(CONF_ROLE, default_role(node)), *capabilities(node))
+                if node is not None
+                else ()
+            )
+        return dict(entry.options), nodes
+
+    def needs_reload(self) -> bool:
+        """The entry changed in a way only a reload applies (nodes, roles, capabilities, options).
+
+        Updates that only record setup progress (``configured``, a refined element count)
+        leave the snapshot alone and keep the connection up.
+        """
+        return self._snapshot(self.entry) != self._loaded
 
     def _report_unreadable(self, titles: list[str]) -> None:
         issue_id = f"{ISSUE_NODE_UNREADABLE}_{self.entry.entry_id}"

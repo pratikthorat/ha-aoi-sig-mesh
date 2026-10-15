@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
+from .const import DOMAIN, ROLE_LIGHT
 from .coordinator import MeshCoordinator
 from .entity import network_device_info
 from .radio import HaBluetoothRadio
@@ -22,6 +24,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool:
     state = await store.async_load()
     coordinator = MeshCoordinator(hass, entry, HaBluetoothRadio(hass), store, state)
     entry.runtime_data = coordinator
+    _async_remove_stale_entities(hass, coordinator)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     async def _async_on_stop(_event: Event) -> None:
         await coordinator.async_shutdown()
@@ -47,3 +51,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> bool
 async def async_remove_entry(hass: HomeAssistant, entry: AoiConfigEntry) -> None:
     """Deleting the network deletes its mesh state; the address book keeps its addresses."""
     await NetworkStore(hass, entry.entry_id).async_remove()
+
+
+@callback
+def _async_remove_stale_entities(hass: HomeAssistant, coordinator: MeshCoordinator) -> None:
+    """A role change swaps a node's light for a switch (or back): drop the old entity."""
+    registry = er.async_get(hass)
+    for record in coordinator.nodes.values():
+        stale = Platform.SWITCH if record.role == ROLE_LIGHT else Platform.LIGHT
+        unique_id = f"{coordinator.network_id}_{record.node.unicast:04x}_{stale}"
+        if entity_id := registry.async_get_entity_id(stale, DOMAIN, unique_id):
+            registry.async_remove(entity_id)
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: AoiConfigEntry) -> None:
+    """Reload for new or removed nodes, role or capability changes and new options."""
+    if entry.runtime_data.needs_reload():
+        hass.config_entries.async_schedule_reload(entry.entry_id)
