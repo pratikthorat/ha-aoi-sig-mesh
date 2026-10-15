@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .config import OP_NODE_RESET_STATUS, config_node_reset
 from .errors import LinkClosedError, MalformedPDUError, MeshError, MeshTimeout, SeqNotSaved
 from .models import (
     OP_CTL_STATUS,
@@ -244,6 +245,18 @@ class NodeCommands:
         if answered == 0 and last_error is not None:
             raise last_error
         return answered
+
+    async def reset_node(self) -> None:
+        """Config Node Reset (DevKey): the node leaves the network and forgets our keys.
+
+        Only its Node Reset Status proves it did; without one this raises MeshTimeout.
+        """
+        await self._link.request(
+            self._node.unicast,
+            config_node_reset(),
+            OP_NODE_RESET_STATUS,
+            dev_key=self._node.dev_key,
+        )
 
     async def identify(self, *, currently_on: bool) -> None:
         """Health Attention if the node answers it; lights blink three times instead.

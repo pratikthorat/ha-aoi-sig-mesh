@@ -25,13 +25,22 @@ from tests.sim.sim_radio import SimRadio
 from .conftest import NETWORK_ID, PLUG_MAC, make_entry, node_data, setup_entry, until
 
 
-async def _set_role(hass: HomeAssistant, entry: Any, role: str) -> None:
-    subentry_id = next(iter(entry.subentries))
+async def open_role_form(hass: HomeAssistant, entry: Any, subentry_id: str) -> Any:
+    """Manage device, then Change device type."""
     result = await hass.config_entries.subentries.async_init(
         (entry.entry_id, SUBENTRY_NODE),
         context={"source": SOURCE_RECONFIGURE, "subentry_id": subentry_id},
     )
-    assert result["type"] is FlowResultType.FORM
+    assert result["type"] is FlowResultType.MENU
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"next_step_id": "role"}
+    )
+    assert (result["type"], result["step_id"]) == (FlowResultType.FORM, "role")
+    return result
+
+
+async def _set_role(hass: HomeAssistant, entry: Any, role: str) -> None:
+    result = await open_role_form(hass, entry, next(iter(entry.subentries)))
     result = await hass.config_entries.subentries.async_configure(result["flow_id"], {"role": role})
     await hass.async_block_till_done()
     assert result["type"] is FlowResultType.ABORT
@@ -166,10 +175,7 @@ async def test_a_role_chosen_before_first_connect_survives_setup(
     entry = make_entry(("Desk lamp", {**node_data(lamp), "configured": False}))
     await setup_entry(hass, entry)  # no advert yet: not connected
     subentry_id = next(iter(entry.subentries))
-    result = await hass.config_entries.subentries.async_init(
-        (entry.entry_id, SUBENTRY_NODE),
-        context={"source": SOURCE_RECONFIGURE, "subentry_id": subentry_id},
-    )
+    result = await open_role_form(hass, entry, subentry_id)
     await hass.config_entries.subentries.async_configure(result["flow_id"], {"role": "switch"})
     await hass.async_block_till_done()
 
@@ -268,11 +274,7 @@ async def test_a_damaged_sibling_does_not_cause_a_reload(
 
 
 async def _form_default_role(hass: HomeAssistant, entry: Any, subentry_id: str) -> Any:
-    result = await hass.config_entries.subentries.async_init(
-        (entry.entry_id, SUBENTRY_NODE),
-        context={"source": SOURCE_RECONFIGURE, "subentry_id": subentry_id},
-    )
-    assert result["type"] is FlowResultType.FORM
+    result = await open_role_form(hass, entry, subentry_id)
     (key,) = result["data_schema"].schema
     return key.default()
 

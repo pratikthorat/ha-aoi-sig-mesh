@@ -965,6 +965,23 @@ class MeshCoordinator:
             generation,
         )
 
+    async def async_reset_node(self, subentry_id: str) -> None:
+        """Ask the node to leave the network. Raises a translated HomeAssistantError unless
+        it confirmed. Its address stays reserved in the AddressBook either way."""
+        record = self.nodes[subentry_id]
+        await self._async_command(record, lambda commands: commands.reset_node(), count_miss=False)
+        # It forgot our keys and will count its seq from 0 if it is ever provisioned again.
+        self.async_forget_node(record.node.unicast, record.node.element_count)
+
+    @callback
+    def async_setup_again(self, subentry_id: str) -> None:
+        """Run the setup on the mesh again (Composition, AppKey, binds, publication, Health):
+        now if connected, else on the next connect. The role is kept."""
+        record = self.nodes[subentry_id]
+        record.configured = False
+        if (link := self.manager.link) is not None:
+            self._spawn(self._async_connect_pass(link), "aoi_sig_mesh setup again")
+
     async def async_identify(self, subentry_id: str) -> None:
         record = self.nodes[subentry_id]
         currently_on = bool(record.confirmed.on)  # the blinks end where the node really is

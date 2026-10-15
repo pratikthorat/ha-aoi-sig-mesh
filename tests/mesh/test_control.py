@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from mesh import control, proxy
+from mesh.config import OP_NODE_RESET
 from mesh.control import (
     NodeCommands,
     NodeState,
@@ -469,3 +470,27 @@ def test_identify_refuses_a_plug_without_health():
         assert sets(plug) == []
 
     run(scenario())
+
+
+def test_reset_node_waits_for_the_node_reset_status():
+    async def scenario():
+        sim = SimMesh()
+        plug = sim.add_node("onoff")
+        link, _ = await open_link(sim)
+        await NodeCommands(link, node_for(plug), Quirk.NONE, TidCounter()).reset_node()
+        assert plug.reset
+        assert [opcode for _, opcode, _ in plug.received] == [OP_NODE_RESET]
+
+    run(scenario())
+
+
+def test_reset_node_without_a_status_times_out():
+    async def scenario():
+        sim = SimMesh()
+        plug = sim.add_node("onoff")
+        link, _ = await open_link(sim)
+        sim.silent = True
+        with pytest.raises(MeshTimeout):
+            await NodeCommands(link, node_for(plug), Quirk.NONE, TidCounter()).reset_node()
+
+    run(scenario(), timeout=10)

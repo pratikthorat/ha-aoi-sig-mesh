@@ -122,7 +122,7 @@
       "entry_type": "Device",
       "initiate_flow": {
         "user": "Add device",
-        "reconfigure": "Change device type"
+        "reconfigure": "Manage device"
       },
       "step": {
         "user": {
@@ -138,10 +138,32 @@
           }
         },
         "reconfigure": {
+          "title": "Manage device",
+          "menu_options": {
+            "role": "Change device type",
+            "setup_again": "Run setup again",
+            "reset_remove": "Reset and remove"
+          }
+        },
+        "role": {
           "title": "Change device type",
           "description": "Show the device as a light or as a switch.",
           "data": {
             "role": "Device type"
+          }
+        },
+        "setup_again": {
+          "title": "Run setup again",
+          "description": "Home Assistant reads {name}'s models again and sets it up as on the first connect: application key, bindings (Health too, for Identify), status publication and colour temperature range. The device type stays. Use this after a firmware update, or for a device set up by an older version."
+        },
+        "reset_remove": {
+          "title": "Reset and remove",
+          "description": "Home Assistant tells {name} to leave the network (Config Node Reset), then deletes it here. The device forgets the network's keys and advertises as factory-reset again. Deleting the device any other way leaves it in the network.",
+          "data": {
+            "remove_anyway": "Delete it here even if it does not confirm"
+          },
+          "data_description": {
+            "remove_anyway": "For a device that is broken or gone. If it still works it keeps the network's keys: factory-reset it by hand."
           }
         }
       },
@@ -155,7 +177,10 @@
         "cannot_save": "The device's address could not be saved ({detail}), so nothing was sent to the device. Check the Home Assistant log for disk errors and try again.",
         "unknown": "Something unexpected went wrong while adding the device. Check the Home Assistant log and try again.",
         "already_provisioning": "That device is already being added in another window.",
-        "reconfigure_successful": "The device type was changed."
+        "reconfigure_successful": "The device type was changed.",
+        "setup_again_started": "{name} is set up again now, or on the next connection to the network.",
+        "device_reset": "{name} left the network and was deleted.",
+        "device_removed": "{name} was deleted here without confirming the reset. If it still works, factory-reset it by hand."
       },
       "progress": {
         "provision": "Adding {name} to the network. Keep it powered and close by; this takes up to a minute."
@@ -167,7 +192,8 @@
         "no_address": "This network has no free address left for the device.",
         "cannot_save": "The device's address could not be saved ({detail}), so nothing was sent to the device. Check the Home Assistant log for disk errors and try again.",
         "unknown": "Something unexpected went wrong while adding the device. Check the Home Assistant log and try again.",
-        "already_provisioning": "That device is already being added in another window."
+        "already_provisioning": "That device is already being added in another window.",
+        "reset_failed": "{name} did not confirm the reset. Check it is powered and in range, or tick the box to delete it here anyway."
       }
     }
   },

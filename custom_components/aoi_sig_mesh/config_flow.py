@@ -58,6 +58,7 @@ from .const import (
     CONF_PUBLISH_SETUP,
     CONF_RANGE_HIGH,
     CONF_RANGE_LOW,
+    CONF_REMOVE_ANYWAY,
     CONF_ROLE,
     CONF_SOURCE_ENTRY,
     DEFAULT_IDLE_TIMEOUT,
@@ -849,7 +850,8 @@ class AoiSigMeshOptionsFlow(OptionsFlow):
 
 
 class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
-    """Add device provisions a factory-reset device; reconfigure picks the role."""
+    """Add device provisions a factory-reset device; reconfigure (Manage device) changes the
+    role, runs the setup again or resets and removes the device."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -918,6 +920,12 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
+        return self.async_show_menu(
+            step_id="reconfigure", menu_options=["role", "setup_again", "reset_remove"]
+        )
+
+    async def async_step_role(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Change the device type (light or switch)."""
         subentry = self._get_reconfigure_subentry()
         if user_input is not None:
             return self.async_update_and_abort(
@@ -937,4 +945,64 @@ class NodeSubentryFlow(ProvisionSteps, ConfigSubentryFlow):
                 ),
             }
         )
-        return self.async_show_form(step_id="reconfigure", data_schema=schema)
+        return self.async_show_form(step_id="role", data_schema=schema)
+
+    def _loaded_node(self) -> str | None:
+        """The subentry ID, if the network is running and could read this node."""
+        entry, subentry = self._get_entry(), self._get_reconfigure_subentry()
+        if (
+            entry.state is ConfigEntryState.LOADED
+            and subentry.subentry_id in entry.runtime_data.nodes
+        ):
+            return subentry.subentry_id
+        return None
+
+    async def async_step_setup_again(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Set the node up on the mesh again, as on the first connect; the role stays."""
+        entry, subentry = self._get_entry(), self._get_reconfigure_subentry()
+        if user_input is None:
+            return self.async_show_form(
+                step_id="setup_again", description_placeholders={"name": subentry.title}
+            )
+        self.hass.config_entries.async_update_subentry(
+            entry, subentry, data={**subentry.data, CONF_CONFIGURED: False}
+        )
+        if (subentry_id := self._loaded_node()) is not None:
+            entry.runtime_data.async_setup_again(subentry_id)
+        return self.async_abort(
+            reason="setup_again_started", description_placeholders={"name": subentry.title}
+        )
+
+    async def async_step_reset_remove(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Send Config Node Reset, then delete the device here. Deleting a device any other way
+        leaves it on the mesh with the network's keys (its address is never given out again)."""
+        entry, subentry = self._get_entry(), self._get_reconfigure_subentry()
+        placeholders = {"name": subentry.title}
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            confirmed = False
+            if (subentry_id := self._loaded_node()) is not None:
+                try:
+                    await entry.runtime_data.async_reset_node(subentry_id)
+                except HomeAssistantError as err:
+                    _LOGGER.warning("%s: Node Reset was not confirmed: %s", subentry.title, err)
+                else:
+                    confirmed = True
+            if confirmed or user_input[CONF_REMOVE_ANYWAY]:
+                self.hass.config_entries.async_remove_subentry(entry, subentry.subentry_id)
+                return self.async_abort(
+                    reason="device_reset" if confirmed else "device_removed",
+                    description_placeholders=placeholders,
+                )
+            errors["base"] = "reset_failed"
+        schema = vol.Schema({vol.Required(CONF_REMOVE_ANYWAY, default=False): bool})
+        return self.async_show_form(
+            step_id="reset_remove",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders=placeholders,
+        )

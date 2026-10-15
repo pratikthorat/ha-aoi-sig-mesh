@@ -71,7 +71,15 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "options.step.init.data.publish_setup",
         "config_subentries.node.initiate_flow.user",
         "config_subentries.node.initiate_flow.reconfigure",
-        "config_subentries.node.step.reconfigure.data.role",
+        "config_subentries.node.step.reconfigure.menu_options.role",
+        "config_subentries.node.step.reconfigure.menu_options.setup_again",
+        "config_subentries.node.step.reconfigure.menu_options.reset_remove",
+        "config_subentries.node.step.role.data.role",
+        "config_subentries.node.step.reset_remove.data.remove_anyway",
+        "config_subentries.node.error.reset_failed",
+        "config_subentries.node.abort.setup_again_started",
+        "config_subentries.node.abort.device_reset",
+        "config_subentries.node.abort.device_removed",
         "config_subentries.node.step.user.data.device",
         "config_subentries.node.step.user.data.role",
         "config_subentries.node.progress.provision",
@@ -156,6 +164,16 @@ def test_provisioning_texts_use_only_the_placeholders_the_flow_passes() -> None:
     assert placeholders(config["step"]["device"]["description"]) == {"name"}
     assert placeholders(config["abort"]["device_added"]) == {"name", "network"}
     assert placeholders(config["flow_title"]) == {"name"}
+    node = STRINGS["config_subentries"]["node"]
+    for text in (
+        node["step"]["setup_again"]["description"],
+        node["step"]["reset_remove"]["description"],
+        node["error"]["reset_failed"],
+        node["abort"]["setup_again_started"],
+        node["abort"]["device_reset"],
+        node["abort"]["device_removed"],
+    ):
+        assert placeholders(text) == {"name"}
 
 
 def test_exceptions_name_the_device() -> None:
