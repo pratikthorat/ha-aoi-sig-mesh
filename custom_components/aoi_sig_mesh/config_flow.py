@@ -390,21 +390,33 @@ class AoiSigMeshConfigFlow(ProvisionSteps, ConfigFlow, domain=DOMAIN):
         # HA passes the submitted values on again when progress ends in this step: a pending
         # failure means they were already used, so only show the form.
         if user_input is not None and failure is None:
-            self._set_choice(device, user_input[CONF_ROLE])
-            if networks:
-                self._target = self.hass.config_entries.async_get_entry(user_input[CONF_NETWORK])
-                if self._target is None:  # deleted while the form was open
-                    return self.async_abort(reason="network_gone")
-            elif self._new_network is None:  # a retry keeps the network made for the first try
-                self._name = user_input[CONF_NAME]
-                net_key = secrets.token_bytes(16)
-                network_id = NetworkKeys.from_net_key(net_key).network_id.hex()
-                if not await self._async_reserve_address(network_id, NEW_NETWORK_ADDRESS):
-                    return self.async_abort(reason="cannot_save")
-                self._new_network = network_data(
-                    self._name, net_key, secrets.token_bytes(16), NEW_NETWORK_ADDRESS
-                )
-            return await self.async_step_provision()
+            # Branch on what was submitted, not on the live list: the form may be older than
+            # a network that was deleted or made since. A submit of the wrong shape only
+            # shows the form again.
+            if CONF_NETWORK in user_input:
+                target = self.hass.config_entries.async_get_entry(user_input[CONF_NETWORK])
+                if target is None or target.source == SOURCE_IGNORE:
+                    return self.async_abort(
+                        reason="network_gone"
+                    )  # deleted while the form was open
+                self._set_choice(device, user_input[CONF_ROLE])
+                self._target = target
+                return await self.async_step_provision()
+            if CONF_NAME in user_input and not networks:
+                self._set_choice(device, user_input[CONF_ROLE])
+                self._target = None  # a stale target must not outlive its network
+                self._name = user_input[CONF_NAME]  # the last name submitted, keys kept
+                if self._new_network is None:  # a retry keeps the network made for the first try
+                    net_key = secrets.token_bytes(16)
+                    network_id = NetworkKeys.from_net_key(net_key).network_id.hex()
+                    if not await self._async_reserve_address(network_id, NEW_NETWORK_ADDRESS):
+                        return self.async_abort(reason="cannot_save")
+                    self._new_network = network_data(
+                        self._name, net_key, secrets.token_bytes(16), NEW_NETWORK_ADDRESS
+                    )
+                else:
+                    self._new_network[CONF_NAME] = self._name
+                return await self.async_step_provision()
         fields: dict[Any, Any] = {}
         if networks:
             options = [SelectOptionDict(value=e.entry_id, label=e.title) for e in networks]

@@ -57,6 +57,7 @@ def test_english_translation_is_a_copy_of_strings() -> None:
         "config.error.provision_failed_remote",
         "config.error.oob_required",
         "config.error.unknown",
+        "config.error.cannot_save",
         "config.error.already_provisioning",
         "config.abort.device_gone",
         "config.abort.device_added",

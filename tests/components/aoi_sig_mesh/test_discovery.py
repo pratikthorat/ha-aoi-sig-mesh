@@ -155,10 +155,13 @@ async def test_a_failure_shows_on_the_device_form_and_a_retry_keeps_the_new_netw
     assert result["errors"] == {"base": "provision_failed"}
     assert result["description_placeholders"]["step"] == "public_key"
     plug.stall_at = None
-    result = await provision(hass, result, name="Ignored", role="auto")
+    result = await provision(hass, result, name="Renamed", role="auto")
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["result"].title == "Flat"
-    # one network was made, so one address 0x0001 was reserved for it
+    assert result["result"].title == "Renamed"  # the name of the last submit
+    assert result["result"].data["name"] == "Renamed"
+    # the same network, not a second one: same keys, one address 0x0001 reserved for it
+    assert result["result"].data["net_key"] == NET_KEY.hex() == plug.provisioned.net_key.hex()
+    assert result["result"].data["app_key"] == APP_KEY.hex()
     network_id = result["result"].unique_id
     assert await AddressBook(hass).async_used(network_id) == [(0x0001, 1)]
     await hass.async_block_till_done()
@@ -288,3 +291,96 @@ async def test_a_new_network_that_cannot_reserve_our_address_aborts(
 
     assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "cannot_save")
     assert hass.config_entries.async_entries(DOMAIN) == []
+
+
+async def test_a_retry_with_another_role_stores_the_new_role(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    plug = SimUnprovisioned(PLUG_MAC, name="Plug", stall_at="public_key")
+    radio.advertise_unprovisioned(plug)
+    result = await discover(hass, plug)
+    result = await provision(hass, result, name="Flat", role="auto")
+    assert result["errors"] == {"base": "provision_failed"}
+    plug.stall_at = None
+
+    result = await provision(hass, result, name="Flat", role="light")
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    (subentry,) = result["result"].subentries.values()
+    assert subentry.data["role"] == "light"
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(result["result"].entry_id)
+
+
+async def test_a_save_failure_while_adding_shows_a_translated_error(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing(*_args: Any, **_kwargs: Any) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(AddressBook, "async_reserve_node", failing)
+    plug = SimUnprovisioned(PLUG_MAC, name="Plug")
+    radio.advertise_unprovisioned(plug)
+    result = await discover(hass, plug)
+
+    result = await provision(hass, result, name="Flat", role="auto")
+
+    assert (result["type"], result["step_id"]) == (FlowResultType.FORM, "device")
+    assert result["errors"] == {"base": "cannot_save"}
+
+
+async def test_the_chosen_network_deleted_while_the_form_was_open_aborts(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    only = make_entry(network_id="0011223344556677")
+    only.add_to_hass(hass)
+    plug = SimUnprovisioned(PLUG_MAC, name="Plug")
+    radio.advertise_unprovisioned(plug)
+    result = await discover(hass, plug)
+    await hass.config_entries.async_remove(only.entry_id)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"network": only.entry_id, "role": "auto"}
+    )
+
+    assert (result["type"], result["reason"]) == (FlowResultType.ABORT, "network_gone")
+
+
+async def test_a_name_submitted_after_a_network_appeared_shows_the_form_again(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    plug = SimUnprovisioned(PLUG_MAC, name="Plug")
+    radio.advertise_unprovisioned(plug)
+    result = await discover(hass, plug)  # no network yet: the form asks for a name
+    make_entry(network_id="0011223344556677").add_to_hass(hass)  # another dialog made one
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"name": "Flat", "role": "auto"}
+    )
+
+    assert (result["type"], result["step_id"]) == (FlowResultType.FORM, "device")
+    assert [str(key) for key in result["data_schema"].schema] == ["network", "role"]
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1  # nothing was made
+
+
+async def test_a_retry_after_the_target_network_was_deleted_does_not_use_its_keys(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    target = make_entry(network_id="0011223344556677")
+    target.add_to_hass(hass)
+    plug = SimUnprovisioned(PLUG_MAC, name="Plug", stall_at="public_key")
+    radio.advertise_unprovisioned(plug)
+    result = await discover(hass, plug)
+    result = await provision(hass, result, network=target.entry_id, role="auto")
+    assert result["errors"] == {"base": "provision_failed"}
+    await hass.config_entries.async_remove(target.entry_id)
+    plug.stall_at = None
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])  # form, redrawn
+    assert [str(key) for key in result["data_schema"].schema] == ["name", "role"]
+
+    result = await provision(hass, result, name="Fresh", role="auto")
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY  # a new network, not the deleted one
+    assert result["result"].title == "Fresh"
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(result["result"].entry_id)

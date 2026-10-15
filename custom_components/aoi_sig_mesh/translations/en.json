@@ -78,7 +78,8 @@
       "provision_failed_remote": "The device stopped answering at the {step} step ({detail}) through an ESPHome Bluetooth proxy. Try again with the device close to Home Assistant's own Bluetooth adapter.",
       "oob_required": "This device needs a code (OOB authentication) to join, which this integration does not support yet.",
       "unknown": "Something unexpected went wrong while adding the device. Check the Home Assistant log and try again.",
-      "already_provisioning": "That device is already being added in another window."
+      "already_provisioning": "That device is already being added in another window.",
+      "cannot_save": "The device's address could not be saved ({detail}), so nothing was sent to the device. Check the Home Assistant log for disk errors and try again."
     },
     "abort": {
       "already_configured": "This network or device is already set up.",
@@ -87,7 +88,7 @@
       "not_supported": "This Bluetooth device cannot be set up from discovery.",
       "node_added": "The device was added to your existing network.",
       "address_conflict": "This device's old integration sent from this network's own address; importing it would be unsafe.",
-      "cannot_save": "The provisioner address could not be saved, so nothing was imported. Check the Home Assistant log for disk errors.",
+      "cannot_save": "The provisioner address could not be saved, so nothing was added. Check the Home Assistant log for disk errors.",
       "provision_failed": "The device stopped answering at the {step} step ({detail}) and is no longer in range. Move it closer and try again.",
       "provision_failed_remote": "The device stopped answering at the {step} step ({detail}) through an ESPHome Bluetooth proxy and is no longer in range. Try again with it close to Home Assistant's own Bluetooth adapter.",
       "oob_required": "This device needs a code (OOB authentication) to join, which this integration does not support yet.",
