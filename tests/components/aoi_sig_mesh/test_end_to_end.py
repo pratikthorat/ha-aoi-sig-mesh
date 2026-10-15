@@ -4,7 +4,6 @@ invariants checked on everything the network sent."""
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +17,7 @@ from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.aoi_sig_mesh import config_flow
 from custom_components.aoi_sig_mesh import provision as provision_module
+from custom_components.aoi_sig_mesh.light import brightness_to_lightness
 from custom_components.aoi_sig_mesh.mesh import provisioner
 from custom_components.aoi_sig_mesh.mesh.network import MeshNetwork
 from custom_components.aoi_sig_mesh.store import NetworkStore
@@ -33,6 +33,7 @@ PLUG_MAC = "DC:23:50:00:00:27"
 LAMP_MAC = "DC:23:50:00:00:28"
 OUR_ADDRESS = 0x0001
 
+# Task-local: set only in the provisioning task, so it is never reset (no other task sees it).
 PROVISIONING = contextvars.ContextVar("provisioning", default=False)
 
 
@@ -46,8 +47,16 @@ def fast_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def sim_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     """The new network gets the sim's keys (NetKey, then AppKey), so the sim can join it."""
-    keys: Iterator[bytes] = iter([NET_KEY, APP_KEY])
-    monkeypatch.setattr(config_flow, "secrets", SimpleNamespace(token_bytes=lambda n: next(keys)))
+    keys = (NET_KEY, APP_KEY)
+    draws = iter(keys)
+
+    def token_bytes(_n: int) -> bytes:
+        try:
+            return next(draws)
+        except StopIteration:
+            pytest.fail(f"a third key was drawn; the sim only knows {len(keys)}")
+
+    monkeypatch.setattr(config_flow, "secrets", SimpleNamespace(token_bytes=token_bytes))
 
 
 @pytest.fixture
@@ -87,11 +96,12 @@ async def test_factory_reset_devices_become_a_working_switch_and_light(
     coordinator = entry.runtime_data
     await until(lambda: coordinator.connected)
     await until(lambda: hass.states.get("switch.plug") is not None)
+    await until(lambda: all(record.configured for record in coordinator.nodes.values()))
     await hass.services.async_call(
         SWITCH_DOMAIN, SERVICE_TURN_ON, {ATTR_ENTITY_ID: "switch.plug"}, blocking=True
     )
     plug = sim.nodes[0x0002]
-    assert plug.on
+    await until(lambda: plug.on)
     assert len(seq_calls.runs) == 1  # the plug's provisioning run was observed
 
     # 2. A factory-reset lamp (with a Tuya vendor model) is added with Add device.
@@ -113,7 +123,8 @@ async def test_factory_reset_devices_become_a_working_switch_and_light(
         {ATTR_ENTITY_ID: "light.lamp", ATTR_BRIGHTNESS: 128},
         blocking=True,
     )
-    assert lamp.on
+    await until(lambda: lamp.on)
+    assert lamp.lightness == brightness_to_lightness(128)  # 128 * 257 = 0x8080
     assert hass.states.get("switch.plug").state == "on"
 
     # The invariants, over everything we sent.
