@@ -46,6 +46,7 @@ class FakeClient:
     disconnects: int = 0
     cache_clears: int = 0
     hang_clear_cache: bool = False
+    hang_disconnect: bool = False
     fail_disconnect: bool = False
     hang_writes: bool = False
 
@@ -65,6 +66,8 @@ class FakeClient:
 
     async def disconnect(self) -> None:
         self.disconnects += 1
+        if self.hang_disconnect:
+            await asyncio.Event().wait()  # a stuck adapter: the disconnect never returns
         self.is_connected = False
         if self.fail_disconnect:
             raise OSError("adapter went away")
@@ -230,8 +233,8 @@ async def test_a_notification_after_close_is_dropped() -> None:
     assert received == []
 
 
-async def test_a_stuck_cache_clear_never_stops_the_disconnect() -> None:
-    """provision_device bounds close() by CLOSE_TIMEOUT: the link must still be released."""
+async def test_close_still_disconnects_when_an_outer_timeout_cancels_the_cache_clear() -> None:
+    """close() alone: an outer bound firing during the cache clear must not skip disconnect()."""
     assert gatt.CACHE_CLEAR_TIMEOUT < provisioner.CLOSE_TIMEOUT
     client = factory_reset_plug()
     client.hang_clear_cache = True
@@ -242,4 +245,58 @@ async def test_a_stuck_cache_clear_never_stops_the_disconnect() -> None:
         async with asyncio.timeout(0.1):  # the outer bound fires before the cache clear's own
             await transport.close()
 
+    assert client.disconnects == 1
+
+
+async def test_provision_device_still_releases_the_link_when_the_cache_clear_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real close path (provisioner.provision_device's CLOSE_TIMEOUT) with a stuck clear."""
+    monkeypatch.setattr(provisioner, "CAPABILITIES_TIMEOUT", 0.1)
+    monkeypatch.setattr(provisioner, "START_DELAY", 0)
+    monkeypatch.setattr(provisioner, "CLOSE_TIMEOUT", 0.3)
+    monkeypatch.setattr(gatt, "CACHE_CLEAR_TIMEOUT", 5.0)  # the outer bound must be what fires
+    client = factory_reset_plug()
+    client.hang_clear_cache = True
+
+    class Radio:
+        async def connect_provisioning(self, address: str) -> BleakGattTransport:
+            transport = BleakGattTransport.provisioning()
+            await transport.async_attach(client)
+            return transport
+
+    async def assign(caps: Any) -> int:
+        return 2
+
+    with pytest.raises(provisioner.ProvisioningError) as caught:  # the device never answers
+        async with asyncio.timeout(2):  # bounded: a hang here would be a stall
+            await provisioner.provision_device(
+                Radio(),
+                "AA:00:00:00:00:01",
+                net_key=bytes(16),
+                net_key_index=0,
+                iv_index=0,
+                assign=assign,
+            )
+
+    assert caught.value.step == "capabilities"
+    assert client.disconnects == 1
+
+
+async def test_a_hung_disconnect_is_bounded_even_after_an_outer_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gatt, "DISCONNECT_TIMEOUT", 0.1)
+    client = factory_reset_plug()
+    client.hang_clear_cache = True
+    client.hang_disconnect = True
+    transport = BleakGattTransport.provisioning()
+    await transport.async_attach(client)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError):  # the outer bound, spent during the cache clear
+        async with asyncio.timeout(0.05):
+            await transport.close()
+
+    assert asyncio.get_running_loop().time() - started < 1
     assert client.disconnects == 1

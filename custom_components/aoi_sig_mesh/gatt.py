@@ -16,6 +16,7 @@ DATA_IN_UUID = "00002add-0000-1000-8000-00805f9b34fb"
 DATA_OUT_UUID = "00002ade-0000-1000-8000-00805f9b34fb"
 PROVISIONING_DATA_IN_UUID = "00002adb-0000-1000-8000-00805f9b34fb"
 PROVISIONING_DATA_OUT_UUID = "00002adc-0000-1000-8000-00805f9b34fb"
+DISCONNECT_TIMEOUT = 2.0  # close() must return even if the adapter never answers
 CACHE_CLEAR_TIMEOUT = 2.0  # well under provisioner.CLOSE_TIMEOUT, which bounds all of close()
 MIN_WRITE = 20  # ATT_MTU 23 - 3
 WRITE_TIMEOUT = 5.0  # seconds; read at call time, so tests can shorten it
@@ -136,6 +137,7 @@ class BleakGattTransport:
         finally:
             # Always release the link, even if the caller cancels us during the cache clear.
             try:
-                await client.disconnect()
-            except Exception as err:  # closing must never raise
+                async with asyncio.timeout(DISCONNECT_TIMEOUT):
+                    await client.disconnect()
+            except Exception as err:  # incl. TimeoutError; a cancel aimed at us still propagates
                 _LOGGER.debug("Ignoring error while disconnecting: %s", err)
