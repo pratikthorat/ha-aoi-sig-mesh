@@ -17,6 +17,7 @@ from .node import (
     ROLE_CTL,
     ROLE_CTL_TEMP,
     ROLE_HEALTH,
+    ROLE_HSL,
     ROLE_LIGHTNESS,
     ROLE_ONOFF,
     UNICAST_MAX,
@@ -163,7 +164,7 @@ def import_tuya_entry(
             "bad_address", f"{elements} elements is more than {MAX_IMPORT_ELEMENTS}"
         )
     models: dict[str, int] = {}
-    for role in (ROLE_ONOFF, ROLE_LIGHTNESS, ROLE_CTL, ROLE_CTL_TEMP):
+    for role in (ROLE_ONOFF, ROLE_LIGHTNESS, ROLE_CTL, ROLE_CTL_TEMP, ROLE_HSL):
         if role in sig:
             try:
                 models[role] = int(sig[role])

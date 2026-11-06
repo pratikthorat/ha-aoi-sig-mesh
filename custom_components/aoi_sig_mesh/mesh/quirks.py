@@ -14,8 +14,17 @@ class Quirk(enum.Flag):
 
 CID_TUYA = 0x07D0
 
+# The tested AiDot solar spotlights (SL5C) have a quirk:
+#   They will 'dim' the light rather than turn it off under normal operation.
+#   The only way to turn them off is to send a Generic OnOff OFF message.
+#   They also seem to ignore Lightness Set messages when the light is off
+#   so we must send an OnOff ON first before setting the lightness.
+CID_AIDOT = 0x0504
+AIDOT_SOLAR_SPOTLIGHTS_SL5C = (CID_AIDOT, 0x6212)
+
 QUIRKS: dict[tuple[int, int | None], Quirk] = {
     (CID_TUYA, None): Quirk.OFF_VIA_ONOFF | Quirk.ON_BEFORE_SET | Quirk.IGNORE_VENDOR_OPCODES,
+    AIDOT_SOLAR_SPOTLIGHTS_SL5C: Quirk.OFF_VIA_ONOFF,
 }
 
 VENDOR_OPCODE_MIN = 0xC00000

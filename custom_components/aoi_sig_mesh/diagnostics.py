@@ -50,6 +50,8 @@ async def async_get_config_entry_diagnostics(
                     "on": record.state.on,
                     "lightness": record.state.lightness,
                     "kelvin": record.state.kelvin,
+                    "hue": record.state.hue,
+                    "saturation": record.state.saturation,
                 },
             }
             for record in coordinator.nodes.values()

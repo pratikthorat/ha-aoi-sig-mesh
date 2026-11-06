@@ -15,22 +15,34 @@ from .models import (
     OP_CTL_STATUS,
     OP_CTL_TEMP_STATUS,
     OP_HEALTH_ATTENTION_STATUS,
+    OP_HSL_STATUS,
     OP_LIGHTNESS_STATUS,
     OP_ONOFF_STATUS,
     ctl_get,
     ctl_set,
     ctl_temperature_set,
     health_attention_set,
+    hsl_get,
+    hsl_set,
     lightness_get,
     lightness_set,
     onoff_get,
     onoff_set,
     parse_ctl_status,
     parse_ctl_temperature_status,
+    parse_hsl_status,
     parse_lightness_status,
     parse_onoff_status,
 )
-from .node import ROLE_CTL, ROLE_CTL_TEMP, ROLE_HEALTH, ROLE_LIGHTNESS, ROLE_ONOFF, MeshNode
+from .node import (
+    ROLE_CTL,
+    ROLE_CTL_TEMP,
+    ROLE_HEALTH,
+    ROLE_HSL,
+    ROLE_LIGHTNESS,
+    ROLE_ONOFF,
+    MeshNode,
+)
 from .proxy import AccessMessage, ProxyLink
 from .quirks import Quirk
 
@@ -48,6 +60,8 @@ class NodeState:
     on: bool | None = None
     lightness: int | None = None  # last non-zero lightness, kept while off
     kelvin: int | None = None
+    hue: int | None = None
+    saturation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -59,11 +73,13 @@ def _level(present: int, target: int | None) -> int:
     return present if target is None else target
 
 
-def _apply_lightness(state: NodeState, lightness: int) -> None:
+def _apply_lightness(state: NodeState, lightness: int, *, update_power: bool = True) -> None:
     if lightness == 0:
-        state.on = False
+        if update_power:
+            state.on = False
     else:
-        state.on = True
+        if update_power:
+            state.on = True
         state.lightness = lightness
 
 
@@ -72,6 +88,7 @@ STATUS_ROLES = {
     OP_LIGHTNESS_STATUS: ROLE_LIGHTNESS,
     OP_CTL_STATUS: ROLE_CTL,
     OP_CTL_TEMP_STATUS: ROLE_CTL_TEMP,
+    OP_HSL_STATUS: ROLE_HSL,
 }
 
 
@@ -86,11 +103,14 @@ def status_is_for(node: MeshNode, message: AccessMessage) -> bool:
     return role is None or node.models.get(role, node.unicast) == message.src
 
 
-def apply_status(state: NodeState, message: AccessMessage) -> StatusUpdate | None:
+def apply_status(
+    state: NodeState, message: AccessMessage, *, onoff_authoritative: bool = False
+) -> StatusUpdate | None:
     """Fold one status message into ``state``. Returns None for anything that is not a status.
 
     During a transition the target value wins, so the UI shows where the node is heading.
-    Lightness 0 means off; the last non-zero lightness is kept for the next turn-on.
+    Lightness 0 means off when no authoritative OnOff model is available; the last non-zero
+    lightness is kept for the next turn-on.
     """
     try:
         if message.opcode == OP_ONOFF_STATUS:
@@ -99,17 +119,33 @@ def apply_status(state: NodeState, message: AccessMessage) -> StatusUpdate | Non
             return StatusUpdate(onoff.remaining_ms)
         if message.opcode == OP_LIGHTNESS_STATUS:
             light = parse_lightness_status(message.params)
-            _apply_lightness(state, _level(light.present, light.target))
+            _apply_lightness(
+                state, _level(light.present, light.target), update_power=not onoff_authoritative
+            )
             return StatusUpdate(light.remaining_ms)
         if message.opcode == OP_CTL_STATUS:
             ctl = parse_ctl_status(message.params)
-            _apply_lightness(state, _level(ctl.present_lightness, ctl.target_lightness))
+            _apply_lightness(
+                state,
+                _level(ctl.present_lightness, ctl.target_lightness),
+                update_power=not onoff_authoritative,
+            )
             state.kelvin = _level(ctl.present_kelvin, ctl.target_kelvin)
             return StatusUpdate(ctl.remaining_ms)
         if message.opcode == OP_CTL_TEMP_STATUS:
             temp = parse_ctl_temperature_status(message.params)
             state.kelvin = _level(temp.present_kelvin, temp.target_kelvin)
             return StatusUpdate(temp.remaining_ms)
+        if message.opcode == OP_HSL_STATUS:
+            hsl = parse_hsl_status(message.params)
+            _apply_lightness(
+                state,
+                _level(hsl.present_lightness, hsl.target_lightness),
+                update_power=not onoff_authoritative,
+            )
+            state.hue = _level(hsl.present_hue, hsl.target_hue)
+            state.saturation = _level(hsl.present_saturation, hsl.target_saturation)
+            return StatusUpdate(hsl.remaining_ms)
     except MalformedPDUError:
         return None
     return None
@@ -179,14 +215,18 @@ class NodeCommands:
         currently_on: bool,
         lightness: int | None = None,
         kelvin: int | None = None,
+        hue: int | None = None,
+        saturation: int | None = None,
         transition_ms: int | None = None,
     ) -> None:
         models = self._node.models
-        if lightness is not None and ROLE_LIGHTNESS not in models:
+        if lightness is not None and ROLE_LIGHTNESS not in models and ROLE_HSL not in models:
             lightness = None
         if kelvin is not None and not self._node.is_tunable:
             kelvin = None
-        if lightness is None and kelvin is None:
+        if hue is not None and ROLE_HSL not in models:
+            hue = saturation = None
+        if lightness is None and kelvin is None and hue is None:
             await self._onoff(True, transition_ms)
             return
         if kelvin is not None:
@@ -194,7 +234,18 @@ class NodeCommands:
         # A Set while off is ignored by Tuya; a temperature-only Set never turns a light on.
         if not currently_on and (Quirk.ON_BEFORE_SET in self._quirks or lightness is None):
             await self._onoff(True)
-        if lightness is not None and kelvin is not None:
+        if hue is not None and saturation is not None:
+            address = models[ROLE_HSL]
+            tid = self._tids.next(address)
+            access = hsl_set(
+                0xFFFF if lightness is None else lightness,
+                hue,
+                saturation,
+                tid,
+                transition_ms=transition_ms,
+            )
+            await self._link.request(address, access, OP_HSL_STATUS)
+        elif lightness is not None and kelvin is not None:
             address = models[ROLE_CTL]
             tid = self._tids.next(address)
             access = ctl_set(lightness, kelvin, tid, transition_ms=transition_ms)
@@ -231,7 +282,9 @@ class NodeCommands:
         ]
         if ROLE_CTL in models:
             gets.append((models[ROLE_CTL], ctl_get(), OP_CTL_STATUS))
-        elif ROLE_LIGHTNESS in models:
+        if ROLE_HSL in models:
+            gets.append((models[ROLE_HSL], hsl_get(), OP_HSL_STATUS))
+        elif ROLE_CTL not in models and ROLE_LIGHTNESS in models:
             gets.append((models[ROLE_LIGHTNESS], lightness_get(), OP_LIGHTNESS_STATUS))
         answered = 0
         last_error: MeshTimeout | None = None

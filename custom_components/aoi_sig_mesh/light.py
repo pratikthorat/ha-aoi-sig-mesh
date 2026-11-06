@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_HS_COLOR,
     ATTR_TRANSITION,
     ColorMode,
     LightEntity,
@@ -59,16 +60,21 @@ class AoiLight(AoiNodeEntity, LightEntity):
     def __init__(self, coordinator: MeshCoordinator, record: NodeRecord) -> None:
         super().__init__(coordinator, record, "light")
         node = record.node
+        modes = set()
+        if node.is_color:
+            modes.add(ColorMode.HS)
         if node.is_tunable:
-            mode = ColorMode.COLOR_TEMP
+            modes.add(ColorMode.COLOR_TEMP)
             self._attr_min_color_temp_kelvin = node.kelvin_min
             self._attr_max_color_temp_kelvin = node.kelvin_max
-        elif ROLE_LIGHTNESS in node.models:
-            mode = ColorMode.BRIGHTNESS
-        else:
-            mode = ColorMode.ONOFF
-        self._attr_color_mode = mode
-        self._attr_supported_color_modes = {mode}
+        if not modes:
+            modes.add(ColorMode.BRIGHTNESS if ROLE_LIGHTNESS in node.models else ColorMode.ONOFF)
+        self._attr_supported_color_modes = modes
+        self._color_mode = ColorMode.HS if node.is_color else next(iter(modes))
+
+    @property
+    def color_mode(self) -> ColorMode:
+        return self._color_mode
 
     @property
     def is_on(self) -> bool | None:
@@ -76,22 +82,41 @@ class AoiLight(AoiNodeEntity, LightEntity):
 
     @property
     def brightness(self) -> int | None:
-        if self._attr_color_mode == ColorMode.ONOFF or self.record.state.lightness is None:
+        if (
+            ColorMode.ONOFF in self._attr_supported_color_modes
+            or self.record.state.lightness is None
+        ):
             return None
         return lightness_to_brightness(self.record.state.lightness)
 
     @property
     def color_temp_kelvin(self) -> int | None:
-        if self._attr_color_mode != ColorMode.COLOR_TEMP:
+        if ColorMode.COLOR_TEMP not in self._attr_supported_color_modes:
             return None
         return self.record.state.kelvin
 
+    @property
+    def hs_color(self) -> tuple[float, float] | None:
+        if not self.record.node.is_color:
+            return None
+        hue, saturation = self.record.state.hue, self.record.state.saturation
+        if hue is None or saturation is None:
+            return None
+        return hue * 360 / 65535, saturation * 100 / 65535
+
     async def async_turn_on(self, **kwargs: Any) -> None:
         brightness = kwargs.get(ATTR_BRIGHTNESS)
+        hs_color = kwargs.get(ATTR_HS_COLOR)
+        if ATTR_COLOR_TEMP_KELVIN in kwargs:
+            self._color_mode = ColorMode.COLOR_TEMP
+        elif hs_color is not None:
+            self._color_mode = ColorMode.HS
         await self.coordinator.async_turn_on(
             self.record.subentry_id,
             lightness=None if brightness is None else brightness_to_lightness(brightness),
             kelvin=kwargs.get(ATTR_COLOR_TEMP_KELVIN),
+            hue=None if hs_color is None else round(hs_color[0] * 65535 / 360) % 65536,
+            saturation=None if hs_color is None else round(hs_color[1] * 65535 / 100),
             transition_ms=transition_ms(kwargs),
         )
 

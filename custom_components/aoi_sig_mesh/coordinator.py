@@ -47,7 +47,7 @@ from .mesh.connection import ConnectionManager, MeshRadio, ProxyCandidate
 from .mesh.control import NodeCommands, NodeState, TidCounter, apply_status, status_is_for
 from .mesh.errors import LinkClosedError, MeshError, MeshTimeout, NoMeshLink, SeqNotSaved
 from .mesh.network import BeaconOutcome, MeshNetwork
-from .mesh.node import ROLE_HEALTH, ROLE_LIGHTNESS, MeshNode
+from .mesh.node import ROLE_HEALTH, ROLE_HSL, ROLE_LIGHTNESS, ROLE_ONOFF, MeshNode
 from .mesh.pdu import SecureBeacon
 from .mesh.proxy import AccessMessage, ProxyLink
 from .mesh.quirks import Quirk, is_vendor_opcode, quirks_for
@@ -130,6 +130,7 @@ def capabilities(node: MeshNode) -> tuple[Any, ...]:
     return (
         node.is_light,
         node.is_tunable,
+        node.is_color,
         ROLE_LIGHTNESS in node.models,
         node.kelvin_min,
         node.kelvin_max,
@@ -632,12 +633,15 @@ class MeshCoordinator:
         record.last_seen = dt_util.utcnow()
         record.failures = 0
         record.available = True
+        onoff_authoritative = ROLE_ONOFF in record.node.models
         # Seen (above) whichever element spoke; the state only from the one owning the model.
         update = (
-            apply_status(record.state, message) if status_is_for(record.node, message) else None
+            apply_status(record.state, message, onoff_authoritative=onoff_authoritative)
+            if status_is_for(record.node, message)
+            else None
         )
         if update is not None:
-            apply_status(record.confirmed, message)
+            apply_status(record.confirmed, message, onoff_authoritative=onoff_authoritative)
             record.generation += 1  # a failed command no longer reverts over this
         self._notify(record.subentry_id)
         if update is not None and update.remaining_ms:
@@ -961,11 +965,26 @@ class MeshCoordinator:
         *,
         lightness: int | None = None,
         kelvin: int | None = None,
+        hue: int | None = None,
+        saturation: int | None = None,
         transition_ms: int | None = None,
     ) -> None:
         record = self.nodes[subentry_id]
         if record.role == ROLE_SWITCH:  # a switch sends Generic OnOff only
-            lightness = kelvin = None
+            lightness = kelvin = hue = saturation = None
+        if hue is not None and lightness is None:
+            lightness = record.state.lightness or 0xFFFF
+        if (
+            lightness is not None
+            and kelvin is None
+            and ROLE_HSL in record.node.models
+            and hue is None
+        ):
+            if record.state.hue is not None and record.state.saturation is not None:
+                hue = record.state.hue
+                saturation = record.state.saturation
+            elif ROLE_LIGHTNESS not in record.node.models:
+                hue = saturation = 0
         before = replace(record.state)
         currently_on = bool(record.confirmed.on)  # a pending command's optimism is no proof
         record.state.on = True
@@ -973,6 +992,18 @@ class MeshCoordinator:
             record.state.lightness = lightness
         if kelvin is not None and record.node.is_tunable:
             record.state.kelvin = max(record.node.kelvin_min, min(record.node.kelvin_max, kelvin))
+        if hue is not None:
+            record.state.hue = hue
+            record.state.saturation = saturation
+        if ROLE_HSL in record.node.models:
+            _LOGGER.debug(
+                "%s: light command lightness=%s kelvin=%s hue=%s saturation=%s",
+                record.title,
+                lightness,
+                kelvin,
+                hue,
+                saturation,
+            )
         generation = self._begin(record)
         await self._async_command(
             record,
@@ -980,6 +1011,8 @@ class MeshCoordinator:
                 currently_on=currently_on,
                 lightness=lightness,
                 kelvin=kelvin,
+                hue=hue,
+                saturation=saturation,
                 transition_ms=transition_ms,
             ),
             before,

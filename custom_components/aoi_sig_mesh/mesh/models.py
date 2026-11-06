@@ -13,6 +13,7 @@ MODEL_GENERIC_ONOFF_SERVER = 0x1000
 MODEL_LIGHT_LIGHTNESS_SERVER = 0x1300
 MODEL_LIGHT_CTL_SERVER = 0x1303
 MODEL_LIGHT_CTL_TEMP_SERVER = 0x1306
+MODEL_LIGHT_HSL_SERVER = 0x1307
 
 OP_HEALTH_ATTENTION_GET = 0x8004
 OP_HEALTH_ATTENTION_SET = 0x8005
@@ -39,6 +40,10 @@ OP_CTL_TEMP_RANGE_STATUS = 0x8263
 OP_CTL_TEMP_SET = 0x8264
 OP_CTL_TEMP_SET_UNACK = 0x8265
 OP_CTL_TEMP_STATUS = 0x8266
+OP_HSL_GET = 0x826D
+OP_HSL_SET = 0x8276
+OP_HSL_SET_UNACK = 0x8277
+OP_HSL_STATUS = 0x8278
 
 KELVIN_MIN = 800
 KELVIN_MAX = 20000
@@ -107,6 +112,11 @@ def _check_lightness(lightness: int) -> None:
 def _check_kelvin(kelvin: int) -> None:
     if not KELVIN_MIN <= kelvin <= KELVIN_MAX:
         raise ValueError(f"temperature {kelvin} K out of range {KELVIN_MIN}-{KELVIN_MAX}")
+
+
+def _check_hsl(value: int, name: str) -> None:
+    if not 0 <= value <= LIGHTNESS_MAX:
+        raise ValueError(f"{name} {value} out of range 0-{LIGHTNESS_MAX}")
 
 
 def onoff_get() -> bytes:
@@ -189,6 +199,31 @@ def ctl_temperature_set(
     )
 
 
+def hsl_get() -> bytes:
+    return encode_opcode(OP_HSL_GET)
+
+
+def hsl_set(
+    lightness: int,
+    hue: int,
+    saturation: int,
+    tid: int,
+    *,
+    transition_ms: int | None = None,
+    delay_ms: int = 0,
+    ack: bool = True,
+) -> bytes:
+    _check_lightness(lightness)
+    _check_hsl(hue, "hue")
+    _check_hsl(saturation, "saturation")
+    opcode = OP_HSL_SET if ack else OP_HSL_SET_UNACK
+    return (
+        encode_opcode(opcode)
+        + struct.pack("<HHHB", lightness, hue, saturation, tid & 0xFF)
+        + _tail(transition_ms, delay_ms)
+    )
+
+
 def ctl_temperature_range_get() -> bytes:
     return encode_opcode(OP_CTL_TEMP_RANGE_GET)
 
@@ -237,6 +272,17 @@ class CTLTemperatureRangeStatus:
     max_kelvin: int
 
 
+@dataclass(frozen=True)
+class HSLStatus:
+    present_lightness: int
+    present_hue: int
+    present_saturation: int
+    target_lightness: int | None
+    target_hue: int | None
+    target_saturation: int | None
+    remaining_ms: int | None
+
+
 def _bad_length(name: str, params: bytes) -> MalformedPDUError:
     return MalformedPDUError(f"{name} with {len(params)} parameter bytes")
 
@@ -278,6 +324,16 @@ def parse_ctl_temperature_status(params: bytes) -> CTLTemperatureStatus:
             kelvin, delta_uv, t_kelvin, t_delta_uv, decode_transition(remaining)
         )
     raise _bad_length("Light CTL Temperature Status", params)
+
+
+def parse_hsl_status(params: bytes) -> HSLStatus:
+    if len(params) == 6:
+        lightness, hue, saturation = struct.unpack("<HHH", params)
+        return HSLStatus(lightness, hue, saturation, None, None, None, None)
+    if len(params) == 13:
+        values = struct.unpack("<HHHHHHB", params)
+        return HSLStatus(*values[:3], *values[3:6], decode_transition(values[6]))
+    raise _bad_length("Light HSL Status", params)
 
 
 def parse_ctl_temperature_range_status(params: bytes) -> CTLTemperatureRangeStatus:
