@@ -36,7 +36,12 @@ class _StrictStore(Store[dict[str, Any]]):
             "data": data,
         }
         async with self._write_lock:
-            self._manager.async_invalidate(self.key)
+            # HA <= 2026.10 uses Store._manager; HA 2026.11 moved
+            # preload-cache invalidation to the instance I/O backend.
+            if (manager := getattr(self, "_manager", None)) is not None:
+                manager.async_invalidate(self.key)
+            else:
+                self._io.async_invalidate_cache()
             await self._async_write_data(envelope)
             # Like Store._async_handle_write_data: no held payload may outlive a write, or the
             # next async_load on this instance returns it instead of what is on disk.
