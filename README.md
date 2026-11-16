@@ -1,6 +1,9 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pratikthorat/ha-aoi-sig-mesh/main/custom_components/aoi_sig_mesh/brand/dark_logo@2x.png">
-  <img alt="AoI Bluetooth SIG Mesh" height="96" src="https://raw.githubusercontent.com/pratikthorat/ha-aoi-sig-mesh/main/custom_components/aoi_sig_mesh/brand/logo@2x.png">
+  <img
+    src="https://raw.githubusercontent.com/pratikthorat/ha-aoi-sig-mesh/main/custom_components/aoi_sig_mesh/brand/outlined_logo@2x.png"
+    alt="AoI Bluetooth SIG Mesh"
+    height="96"
+  />
 </picture>
 
 # AoI Bluetooth SIG Mesh
@@ -13,15 +16,16 @@
 
 Control Bluetooth SIG Mesh lights and plugs from Home Assistant. Everything runs locally: there is no vendor hub, no cloud and no account. By Arena of Innovation.
 
-<img alt="Turning a Bluetooth SIG Mesh bulb on, dimming it and changing its colour temperature from Home Assistant" src="raw.githubusercontent.com/pratikthorat/…/demo.gif" width="600">
+<img alt="Turning a Bluetooth SIG Mesh bulb on, dimming it and changing its colour temperature from Home Assistant" src="https://raw.githubusercontent.com/pratikthorat/ha-aoi-sig-mesh/d9babd701c2f0e3245ea758d7d6da7194c0fe802/docs/demo.gif" width="600">
 
 - **On/off plugs** (Generic OnOff) become switches.
 - **Dimmable lights** (Light Lightness) become lights with brightness and transitions.
 - **Tunable-white lights** (Light CTL) also get colour temperature, within the range the light reports.
+- **RGB lights** with the Bluetooth Mesh Light HSL model support hue and saturation control. _(note: tested lights did not show "full" color until brightness was below 60%)_
 - **One Bluetooth connection serves the whole network.** Commands to any device go through whichever mesh device is in range (a "proxy").
 - **Devices report their own changes.** A change made at the device itself shows up in Home Assistant.
 
-**Not in this version:** colour (RGB) lights, mesh groups and scenes (use Home Assistant groups instead), battery sensors and remotes, devices that need an OOB code to pair, more than one key per network, and Telink's proprietary mesh.
+**Not in this version:** mesh groups and scenes (use Home Assistant groups instead), battery sensors and remotes, devices that need an OOB code to pair, more than one key per network, and Telink's proprietary mesh.
 
 ## Install
 
@@ -119,6 +123,8 @@ The mesh code is checked against the sample data in the Bluetooth Mesh specifica
 | What | Status |
 |---|---|
 | Tuya tunable-white bulb, moved from Tuya BLE Mesh | works: on/off, brightness, colour temperature |
+| Tuya RGB Bluetooth mesh lights (sold as Otdair) | works: on/off, brightness, hue and saturation |
+| AiDot solar-powered spotlights | works: LED control and power on/off |
 | On/off plugs | untested on hardware: reports welcome |
 | Adding a factory-reset device | untested on hardware: reports welcome |
 | nRF Mesh import | untested on hardware: reports welcome |

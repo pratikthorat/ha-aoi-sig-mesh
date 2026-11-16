@@ -27,6 +27,17 @@ class _StrictStore(Store[dict[str, Any]]):
     anything is on disk. Either would let a seq be confirmed that was never saved.
     """
 
+    def _async_invalidate_cache(self) -> None:
+        """Invalidate the Store cache across Home Assistant storage API versions."""
+        io = getattr(self, "_io", None)
+        if io is not None and (invalidate_cache := getattr(io, "async_invalidate_cache", None)):
+            invalidate_cache()
+            return
+        if manager := getattr(self, "_manager", None):
+            manager.async_invalidate(self.key)
+            return
+        raise RuntimeError("Home Assistant Store has no cache invalidation API")
+
     async def async_save_strict(self, data: dict[str, Any]) -> None:
         """Write ``data`` now. Raise if it could not be written; return only once it is on disk."""
         envelope = {
@@ -36,7 +47,7 @@ class _StrictStore(Store[dict[str, Any]]):
             "data": data,
         }
         async with self._write_lock:
-            self._manager.async_invalidate(self.key)
+            self._async_invalidate_cache()
             await self._async_write_data(envelope)
             # Like Store._async_handle_write_data: no held payload may outlive a write, or the
             # next async_load on this instance returns it instead of what is on disk.

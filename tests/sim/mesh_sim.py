@@ -44,6 +44,10 @@ from mesh.models import (
     OP_HEALTH_ATTENTION_SET,
     OP_HEALTH_ATTENTION_SET_UNACK,
     OP_HEALTH_ATTENTION_STATUS,
+    OP_HSL_GET,
+    OP_HSL_SET,
+    OP_HSL_SET_UNACK,
+    OP_HSL_STATUS,
     OP_LIGHTNESS_GET,
     OP_LIGHTNESS_SET,
     OP_LIGHTNESS_SET_UNACK,
@@ -93,21 +97,29 @@ APP_KEY = bytes.fromhex("63964771734fbd76e3b40519d1d94a48")
 CLIENT = 0x0001
 SIM_PROXY = 0x7FF0
 TUYA_VENDOR_MODEL = (0x07D0 << 16) | 0x0004
-KINDS = ("ctl", "lightness", "onoff")
+KINDS = ("ctl", "lightness", "onoff", "hsl")
 PROXY_OP_REMOVE_ADDRESSES = 0x02
 SET_LENGTHS = {  # params of each Set: the short form, or the long form with transition + delay
     **dict.fromkeys((OP_ONOFF_SET, OP_ONOFF_SET_UNACK), (2, 4)),
     **dict.fromkeys((OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK), (3, 5)),
     **dict.fromkeys((OP_CTL_SET, OP_CTL_SET_UNACK), (7, 9)),
     **dict.fromkeys((OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), (5, 7)),
+    **dict.fromkeys((OP_HSL_SET, OP_HSL_SET_UNACK), (7, 9)),
 }
 SET_TIDS = {  # Set opcode: (the Get that reads the state back, TID offset in the params)
     **dict.fromkeys((OP_ONOFF_SET, OP_ONOFF_SET_UNACK), (OP_ONOFF_GET, 1)),
     **dict.fromkeys((OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK), (OP_LIGHTNESS_GET, 2)),
     **dict.fromkeys((OP_CTL_SET, OP_CTL_SET_UNACK), (OP_CTL_GET, 6)),
     **dict.fromkeys((OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), (OP_CTL_TEMP_GET, 4)),
+    **dict.fromkeys((OP_HSL_SET, OP_HSL_SET_UNACK), (OP_HSL_GET, 6)),
 }
-UNACK_SETS = (OP_ONOFF_SET_UNACK, OP_LIGHTNESS_SET_UNACK, OP_CTL_SET_UNACK, OP_CTL_TEMP_SET_UNACK)
+UNACK_SETS = (
+    OP_ONOFF_SET_UNACK,
+    OP_LIGHTNESS_SET_UNACK,
+    OP_CTL_SET_UNACK,
+    OP_CTL_TEMP_SET_UNACK,
+    OP_HSL_SET_UNACK,
+)
 TID_WINDOW = 6.0  # seconds: the same src+dst+TID inside it is a retransmission
 STATUS_INVALID_ADDRESS = 0x01
 STATUS_INVALID_MODEL = 0x02
@@ -118,6 +130,7 @@ OPCODE_MODELS = {
     **dict.fromkeys((OP_LIGHTNESS_GET, OP_LIGHTNESS_SET, OP_LIGHTNESS_SET_UNACK), 0x1300),
     **dict.fromkeys((OP_CTL_GET, OP_CTL_SET, OP_CTL_SET_UNACK, OP_CTL_TEMP_RANGE_GET), 0x1303),
     **dict.fromkeys((OP_CTL_TEMP_GET, OP_CTL_TEMP_SET, OP_CTL_TEMP_SET_UNACK), 0x1306),
+    **dict.fromkeys((OP_HSL_GET, OP_HSL_SET, OP_HSL_SET_UNACK), 0x1307),
     **dict.fromkeys(
         (OP_HEALTH_ATTENTION_GET, OP_HEALTH_ATTENTION_SET, OP_HEALTH_ATTENTION_SET_UNACK), 0x0002
     ),
@@ -154,6 +167,8 @@ class SimNode:
     has_app_key: bool = True
     on: bool = False
     lightness: int = 0xFFFF
+    hue: int = 0
+    saturation: int = 0xFFFF
     kelvin: int = 4000
     attention: int = 0
     kelvin_min: int = 2700
@@ -202,6 +217,8 @@ class SimNode:
             )
         elif self.kind == "lightness":
             elements = (Element(0, (*primary, 0x1000, 0x1300), ()),)
+        elif self.kind == "hsl":
+            elements = (Element(0, (*primary, 0x1000, 0x1300, 0x1307), ()),)
         else:
             elements = (Element(0, (*primary, 0x1000), ()),)
         return CompositionData(0, 0x07D0, 0x0280, 0x3737, 10, 3, elements)
@@ -335,6 +352,18 @@ class SimNode:
                 OP_LIGHTNESS_SET_UNACK,
                 OP_LIGHTNESS_STATUS,
                 struct.pack("<H", self.present_lightness),
+            )
+        if self.kind == "hsl" and opcode in (OP_HSL_GET, OP_HSL_SET, OP_HSL_SET_UNACK):
+            if opcode != OP_HSL_GET:
+                lightness, hue, saturation = struct.unpack_from("<HHH", params)
+                if self._set_level(lightness):
+                    self.hue = hue
+                    self.saturation = saturation
+            return self._reply(
+                opcode,
+                OP_HSL_SET_UNACK,
+                OP_HSL_STATUS,
+                struct.pack("<HHH", self.present_lightness, self.hue, self.saturation),
             )
         if self.kind != "ctl":
             return []

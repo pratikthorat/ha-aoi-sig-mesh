@@ -13,6 +13,7 @@ from .models import (
     MODEL_HEALTH_SERVER,
     MODEL_LIGHT_CTL_SERVER,
     MODEL_LIGHT_CTL_TEMP_SERVER,
+    MODEL_LIGHT_HSL_SERVER,
     MODEL_LIGHT_LIGHTNESS_SERVER,
 )
 
@@ -20,6 +21,7 @@ ROLE_ONOFF = "onoff"
 ROLE_LIGHTNESS = "lightness"
 ROLE_CTL = "ctl"
 ROLE_CTL_TEMP = "ctl_temp"
+ROLE_HSL = "hsl"
 ROLE_HEALTH = "health"
 
 MODEL_ROLES = {
@@ -28,6 +30,7 @@ MODEL_ROLES = {
     MODEL_LIGHT_LIGHTNESS_SERVER: ROLE_LIGHTNESS,
     MODEL_LIGHT_CTL_SERVER: ROLE_CTL,
     MODEL_LIGHT_CTL_TEMP_SERVER: ROLE_CTL_TEMP,
+    MODEL_LIGHT_HSL_SERVER: ROLE_HSL,
 }
 
 KELVIN_DEFAULT_MIN = 2700
@@ -76,11 +79,15 @@ class MeshNode:
 
     @property
     def is_light(self) -> bool:
-        return ROLE_LIGHTNESS in self.models or ROLE_CTL in self.models
+        return ROLE_LIGHTNESS in self.models or ROLE_CTL in self.models or ROLE_HSL in self.models
 
     @property
     def is_tunable(self) -> bool:
         return ROLE_CTL in self.models and ROLE_CTL_TEMP in self.models
+
+    @property
+    def is_color(self) -> bool:
+        return ROLE_HSL in self.models
 
     def apply_composition(self, comp: CompositionData) -> None:
         self._check_range(len(comp.elements))

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,6 +12,7 @@ from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_MODE,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_HS_COLOR,
     ATTR_MAX_COLOR_TEMP_KELVIN,
     ATTR_MIN_COLOR_TEMP_KELVIN,
     ATTR_SUPPORTED_COLOR_MODES,
@@ -32,16 +35,26 @@ from homeassistant.helpers import entity_registry as er
 
 from custom_components.aoi_sig_mesh import entity as entity_module
 from custom_components.aoi_sig_mesh.const import DOMAIN, ROLE_LIGHT
+from custom_components.aoi_sig_mesh.coordinator import MeshCoordinator
 from custom_components.aoi_sig_mesh.light import (
+    AoiLight,
     brightness_to_lightness,
     lightness_to_brightness,
 )
+from custom_components.aoi_sig_mesh.mesh.control import NodeState
 from custom_components.aoi_sig_mesh.mesh.models import (
     OP_CTL_TEMP_SET,
     OP_CTL_TEMP_SET_UNACK,
+    OP_HSL_SET,
     OP_ONOFF_SET,
 )
-from custom_components.aoi_sig_mesh.mesh.node import KELVIN_DEFAULT_MAX, KELVIN_DEFAULT_MIN
+from custom_components.aoi_sig_mesh.mesh.node import (
+    KELVIN_DEFAULT_MAX,
+    KELVIN_DEFAULT_MIN,
+    ROLE_CTL,
+    ROLE_HSL,
+    ROLE_LIGHTNESS,
+)
 from tests.sim.mesh_sim import SimMesh, SimNode
 from tests.sim.sim_radio import SimRadio
 
@@ -99,6 +112,35 @@ async def test_color_temperature_goes_to_the_second_element(
     state = hass.states.get(LAMP)
     assert state.attributes[ATTR_COLOR_MODE] == ColorMode.COLOR_TEMP
     assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == 3000
+
+
+async def test_hsl_light_accepts_color_and_reports_mesh_state(
+    hass: HomeAssistant, sim: SimMesh, radio: SimRadio
+) -> None:
+    node = sim.add_node("hsl", unicast=0x00D0)
+    radio.advertise()
+    entry = make_entry(("Color lamp", node_data(node)))
+    coordinator = await setup_entry(hass, entry)
+    await until(lambda: coordinator.connected and node.received)
+    entity_id = "light.color_lamp"
+    await until(lambda: hass.states.get(entity_id) is not None)
+
+    await turn_entity(
+        hass, entity_id, SERVICE_TURN_ON, **{ATTR_HS_COLOR: (120, 75), ATTR_BRIGHTNESS: 128}
+    )
+
+    assert node.on
+    assert node.lightness == 128 * 257
+    assert node.hue == 21845
+    assert node.saturation == 49151
+    sent = [params for _dst, opcode, params in node.received if opcode == OP_HSL_SET]
+    assert struct.unpack_from("<HHHB", sent[-1])[:3] == (128 * 257, 21845, 49151)
+    state = hass.states.get(entity_id)
+    assert state.attributes[ATTR_SUPPORTED_COLOR_MODES] == [ColorMode.HS]
+    assert state.attributes[ATTR_COLOR_MODE] == ColorMode.HS
+    assert state.attributes[ATTR_HS_COLOR] == pytest.approx((120, 75), abs=0.01)
+    assert state.attributes[ATTR_BRIGHTNESS] == 128
+    await hass.config_entries.async_unload(entry.entry_id)
 
 
 async def test_off_uses_onoff_with_the_transition(
@@ -291,3 +333,112 @@ async def test_the_listener_is_removed_when_the_entry_unloads(
 
     assert bulb_entry.state is ConfigEntryState.NOT_LOADED
     assert coordinator._listeners[key] == []
+
+
+class _ColorCoordinator:
+    def __init__(self, state: SimpleNamespace) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.state = state
+
+    async def async_turn_on(self, _subentry_id: str, **kwargs: object) -> None:
+        self.calls.append(kwargs)
+        if (kelvin := kwargs["kelvin"]) is not None:
+            self.state.kelvin = kelvin
+        if kwargs["hue"] is not None:
+            self.state.hue = kwargs["hue"]
+            self.state.saturation = kwargs["saturation"]
+
+
+def color_light(mode: ColorMode) -> tuple[AoiLight, _ColorCoordinator]:
+    state = SimpleNamespace(hue=32768, saturation=32768, kelvin=4000)
+    coordinator = _ColorCoordinator(state)
+    light = object.__new__(AoiLight)
+    light.coordinator = coordinator
+    light.record = SimpleNamespace(
+        subentry_id="node", state=state, node=SimpleNamespace(is_color=True)
+    )
+    light._color_mode = mode
+    return light, coordinator
+
+
+def test_brightness_in_hs_mode_preserves_cached_color() -> None:
+    light, coordinator = color_light(ColorMode.HS)
+
+    asyncio.run(light.async_turn_on(**{ATTR_BRIGHTNESS: 128}))
+
+    assert coordinator.calls[0]["hue"] == 32768
+    assert coordinator.calls[0]["saturation"] == 32768
+    assert coordinator.calls[0]["preserve_hsl_color"] is True
+
+
+def test_brightness_in_white_mode_keeps_kelvin_not_cached_hs() -> None:
+    light, coordinator = color_light(ColorMode.COLOR_TEMP)
+
+    asyncio.run(light.async_turn_on(**{ATTR_BRIGHTNESS: 128}))
+
+    assert coordinator.calls[0]["kelvin"] == 4000
+    assert coordinator.calls[0]["hue"] is None
+    assert coordinator.calls[0]["saturation"] is None
+    assert coordinator.calls[0]["preserve_hsl_color"] is False
+
+
+def test_switching_between_white_and_hs_modes_changes_brightness_path() -> None:
+    light, coordinator = color_light(ColorMode.HS)
+
+    asyncio.run(light.async_turn_on(**{ATTR_COLOR_TEMP_KELVIN: 3000}))
+    asyncio.run(light.async_turn_on(**{ATTR_BRIGHTNESS: 80}))
+    assert light.color_mode == ColorMode.COLOR_TEMP
+    assert coordinator.calls[1]["kelvin"] == 3000
+    assert coordinator.calls[1]["hue"] is None
+
+    asyncio.run(light.async_turn_on(hs_color=(120, 75)))
+    asyncio.run(light.async_turn_on(**{ATTR_BRIGHTNESS: 90}))
+    assert light.color_mode == ColorMode.HS
+    assert coordinator.calls[3]["hue"] == 21845
+    assert coordinator.calls[3]["saturation"] == 49151
+
+
+def test_coordinator_uses_cached_hs_only_when_preservation_is_requested() -> None:
+    calls: list[dict[str, object]] = []
+    record = SimpleNamespace(
+        subentry_id="node",
+        title="light",
+        role=ROLE_LIGHT,
+        state=NodeState(lightness=32768, hue=12345, saturation=54321),
+        confirmed=NodeState(on=True),
+        node=SimpleNamespace(
+            is_tunable=True,
+            models={ROLE_HSL: 1, ROLE_CTL: 1, ROLE_LIGHTNESS: 1},
+            kelvin_min=800,
+            kelvin_max=20000,
+        ),
+    )
+
+    class Commands:
+        async def turn_on(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    async def command(_record, action, _before, _generation) -> None:
+        await action(Commands())
+
+    coordinator = SimpleNamespace(
+        nodes={"node": record},
+        _notify=lambda _subentry_id: None,
+        _begin=lambda _record: 1,
+        _async_command=command,
+    )
+
+    asyncio.run(
+        MeshCoordinator.async_turn_on(coordinator, "node", lightness=30000, preserve_hsl_color=True)
+    )
+    asyncio.run(
+        MeshCoordinator.async_turn_on(
+            coordinator, "node", lightness=30000, kelvin=4000, preserve_hsl_color=False
+        )
+    )
+
+    assert calls[0]["hue"] == 12345
+    assert calls[0]["saturation"] == 54321
+    assert calls[1]["kelvin"] == 4000
+    assert calls[1]["hue"] is None
+    assert calls[1]["saturation"] is None

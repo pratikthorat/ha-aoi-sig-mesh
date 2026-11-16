@@ -5,6 +5,7 @@ from mesh.models import (
     CTLStatus,
     CTLTemperatureRangeStatus,
     CTLTemperatureStatus,
+    HSLStatus,
     LightnessStatus,
     OnOffStatus,
     ctl_get,
@@ -24,6 +25,7 @@ from mesh.models import (
     parse_ctl_status,
     parse_ctl_temperature_range_status,
     parse_ctl_temperature_status,
+    parse_hsl_status,
     parse_lightness_status,
     parse_onoff_status,
     parse_opcode,
@@ -152,6 +154,15 @@ def test_parse_ctl_temperature_status():
     assert parse_ctl_temperature_status(bytes.fromhex("8c0affff")) == CTLTemperatureStatus(
         2700, -1, None, None, None
     )
+
+
+def test_parse_hsl_status():
+    assert parse_hsl_status(bytes.fromhex("0080341256bc")) == HSLStatus(
+        0x8000, 0x1234, 0xBC56, None, None, None, None
+    )
+    assert parse_hsl_status(bytes.fromhex("0080341256bc0a")) == HSLStatus(
+        0x8000, 0x1234, 0xBC56, None, None, None, 1_000
+    )
     assert parse_ctl_temperature_status(bytes.fromhex("8c0a0000641900000a")) == (
         CTLTemperatureStatus(2700, 0, 6500, 0, 1_000)
     )
@@ -176,6 +187,10 @@ def test_parse_attention_status():
         (parse_lightness_status, "00800080"),
         (parse_ctl_status, "ffffa0"),
         (parse_ctl_temperature_status, "8c0a00000000"),
+        (parse_hsl_status, ""),
+        (parse_hsl_status, "34127856bc"),
+        (parse_hsl_status, "34127856bc9a0000"),
+        (parse_hsl_status, "34127856bc9a00000000000000"),
         (parse_ctl_temperature_range_status, "008c0a64"),
         (parse_attention_status, ""),
     ],

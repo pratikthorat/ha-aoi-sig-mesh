@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from homeassistant.core import CoreState, HomeAssistant
@@ -12,7 +13,12 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util.file import WriteError
 
 from custom_components.aoi_sig_mesh.mesh.errors import MeshError
-from custom_components.aoi_sig_mesh.store import AddressBook, NetworkStore, StateSaver
+from custom_components.aoi_sig_mesh.store import (
+    AddressBook,
+    NetworkStore,
+    StateSaver,
+    _StrictStore,
+)
 
 KEY = "aoi_sig_mesh.entry1"
 STATE = {"iv_index": 0, "iv_update": False, "seq": 64, "replay": {}}
@@ -184,3 +190,26 @@ async def test_imported_node_blocks_are_merged_and_then_skipped(hass: HomeAssist
 
     assert await book.async_used_nodes("aa" * 8) == [(0x0002, 2), (0x0005, 1), (0x0007, 1)]
     assert await book.async_reserve_node("aa" * 8, 1, taken=[], low=2, high=0x10) == 0x0004
+
+
+def test_cache_invalidation_uses_store_io_api() -> None:
+    io = SimpleNamespace(async_invalidate_cache=Mock())
+    store = SimpleNamespace(_io=io, key="mesh")
+
+    _StrictStore._async_invalidate_cache(store)
+
+    io.async_invalidate_cache.assert_called_once_with()
+
+
+def test_cache_invalidation_falls_back_to_legacy_manager() -> None:
+    manager = SimpleNamespace(async_invalidate=Mock())
+    store = SimpleNamespace(_manager=manager, key="mesh")
+
+    _StrictStore._async_invalidate_cache(store)
+
+    manager.async_invalidate.assert_called_once_with("mesh")
+
+
+def test_cache_invalidation_fails_if_no_api_is_available() -> None:
+    with pytest.raises(RuntimeError, match="no cache invalidation API"):
+        _StrictStore._async_invalidate_cache(SimpleNamespace(key="mesh"))

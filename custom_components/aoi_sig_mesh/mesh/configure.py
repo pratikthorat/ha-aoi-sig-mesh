@@ -26,13 +26,22 @@ from .models import (
     MODEL_HEALTH_SERVER,
     MODEL_LIGHT_CTL_SERVER,
     MODEL_LIGHT_CTL_TEMP_SERVER,
+    MODEL_LIGHT_HSL_SERVER,
     MODEL_LIGHT_LIGHTNESS_SERVER,
     OP_CTL_TEMP_RANGE_STATUS,
     ctl_temperature_range_get,
     parse_ctl_temperature_range_status,
 )
 from .network import MeshNetwork
-from .node import ROLE_CTL, ROLE_CTL_TEMP, ROLE_HEALTH, ROLE_LIGHTNESS, ROLE_ONOFF, MeshNode
+from .node import (
+    ROLE_CTL,
+    ROLE_CTL_TEMP,
+    ROLE_HEALTH,
+    ROLE_HSL,
+    ROLE_LIGHTNESS,
+    ROLE_ONOFF,
+    MeshNode,
+)
 from .proxy import ProxyLink
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,6 +55,7 @@ BIND_ORDER: tuple[tuple[str, int], ...] = (
     (ROLE_LIGHTNESS, MODEL_LIGHT_LIGHTNESS_SERVER),
     (ROLE_CTL, MODEL_LIGHT_CTL_SERVER),
     (ROLE_CTL_TEMP, MODEL_LIGHT_CTL_TEMP_SERVER),
+    (ROLE_HSL, MODEL_LIGHT_HSL_SERVER),
 )
 
 
